@@ -184,7 +184,12 @@ def node_architect(state: AgentState):
         
         5. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field`.
 
-        6. ORDERING: Define ALL Pydantic models (classes inheriting from BaseModel) BEFORE they are used in any function or State definition. Ensure there are NO `NameError` issues by defining classes at the top.
+        6. STRICT CODE STRUCTURE (Follow this order to prevent NameError):
+           a. Imports
+           b. **ALL Pydantic Models/Classes** (Define them HERE, at the top level, before using them in State or Functions).
+           c. State Definition (TypedDict).
+           d. Node Functions.
+           e. The `run_agent` entry point function.
         
         - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
         """
@@ -250,7 +255,10 @@ def node_code_reviewer(state: AgentState):
         5. Assume `langchain_community` is installed.
         6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
         7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top.
-        8. DEFINITIONS: Ensure all Pydantic models (e.g. `class SynthesizedPoint(BaseModel):`) are defined before they are instantiated or used as type hints.
+        8. CRITICAL FIX for NameError:
+           - You MUST define ALL classes/Pydantic models (e.g. `class TouristSpot(BaseModel):`) **IMMEDIATELY AFTER IMPORTS**.
+           - Do NOT define classes inside functions.
+           - Do NOT define a class AFTER it is used in a TypeHint or State definition.
         9. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
