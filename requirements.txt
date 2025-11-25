@@ -3,3 +3,4 @@ langchain-google-genai
 langchain-core
 langgraph
 python-dotenv
+langchain_community
