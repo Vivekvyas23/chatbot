@@ -183,6 +183,8 @@ def node_architect(state: AgentState):
         4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
         
         5. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field`.
+
+        6. ORDERING: Define ALL Pydantic models (classes inheriting from BaseModel) BEFORE they are used in any function or State definition. Ensure there are NO `NameError` issues by defining classes at the top.
         
         - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
         """
@@ -248,7 +250,8 @@ def node_code_reviewer(state: AgentState):
         5. Assume `langchain_community` is installed.
         6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
         7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top.
-        8. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
+        8. DEFINITIONS: Ensure all Pydantic models (e.g. `class SynthesizedPoint(BaseModel):`) are defined before they are instantiated or used as type hints.
+        9. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
