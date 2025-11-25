@@ -2,7 +2,7 @@ import streamlit as st
 import os
 import re
 import traceback
-from typing import TypedDict, List, Union
+from typing import TypedDict, List, Union, Dict, Any
 import inspect
 import subprocess
 import sys
@@ -181,6 +181,8 @@ def node_architect(state: AgentState):
         
         4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
         
+        5. IMPORTS: Include `from typing import Dict, List, Any`.
+        
         - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -244,7 +246,8 @@ def node_code_reviewer(state: AgentState):
         
         5. Assume `langchain_community` is installed.
         6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
-        7. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
+        7. IMPORTS: Include `from typing import Dict, List, Any` at the top.
+        8. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
