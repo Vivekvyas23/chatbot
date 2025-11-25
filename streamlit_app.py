@@ -21,7 +21,19 @@ This agent builds other agents! Describe what you want, and the pipeline will:
 with st.sidebar:
     st.header("Configuration")
     api_key = st.text_input("Enter Google Gemini API Key", type="password")
-    model_name = st.selectbox("Select Model", ["gemini-1.5-flash", "gemini-1.5-pro"])
+    # Updated model names to include 2.5 flash and other variants
+    model_options = [
+        "gemini-2.5-flash-preview-09-2025",
+        "gemini-2.0-flash-exp",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-001",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+        "gemini-1.5-pro-001",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
+    model_name = st.selectbox("Select Model", model_options)
     
     st.info("Get your key from Google AI Studio.")
 
