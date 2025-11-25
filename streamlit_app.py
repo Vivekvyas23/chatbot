@@ -4,6 +4,8 @@ import re
 import traceback
 from typing import TypedDict, List, Union
 import inspect
+import subprocess
+import sys
 
 # --- Third-party Imports ---
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -89,6 +91,19 @@ def extract_code(text: str) -> str:
     except Exception:
         return text
 
+def install_missing_package(package_name: str):
+    """Attempts to install a missing package via pip."""
+    try:
+        # Security check: basic sanitization to prevent command injection
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
+            raise ValueError("Invalid package name")
+            
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+        return True
+    except Exception as e:
+        st.error(f"Failed to install {package_name}: {e}")
+        return False
+
 # --- Node Logic ---
 
 def node_requirements_analyst(state: AgentState):
@@ -127,7 +142,7 @@ def node_architect(state: AgentState):
         
         Write the Python code to implement this using `langgraph` and `langchain_google_genai`.
         
-        CRITICAL ARCHITECTURE RULE:
+        CRITICAL ARCHITECTURE RULES:
         1. The code MUST be wrapped in a function: 
         `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
         
@@ -137,6 +152,8 @@ def node_architect(state: AgentState):
         3. Define a helper function to list required keys:
         `def get_required_api_keys() -> list[str]:`
         Example: return ["WEATHER_API_KEY"]
+        
+        4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
         
         - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
         """
@@ -200,7 +217,8 @@ def node_code_reviewer(state: AgentState):
         - Return the final text output.
         
         5. Assume `langchain_community` is installed.
-        6. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
+        6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
+        7. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -323,7 +341,23 @@ if st.session_state.get('res_final'):
                     st.warning(f"Could not automatically detect API keys: {e}")
             else:
                 st.warning("Agent code structure incomplete: missing `get_required_api_keys`.")
-                
+
+        except ModuleNotFoundError as e:
+            parsing_error = True
+            missing_module = str(e).split("'")[1] if "'" in str(e) else str(e)
+            
+            st.warning(f"🚨 Missing Module Detected: `{missing_module}`")
+            
+            # Simple heuristic: don't try to install submodules like 'langchain_core.pydantic_v1'
+            if "." in missing_module:
+                st.error(f"Cannot auto-install submodule `{missing_module}`. This is likely a version incompatibility (e.g., using deprecated code). Please regenerate the agent.")
+            else:
+                if st.button(f"📥 Install {missing_module} and Reload"):
+                    with st.spinner(f"Installing {missing_module}..."):
+                        if install_missing_package(missing_module):
+                            st.success("Installed! Reloading app...")
+                            st.rerun()
+
         except SyntaxError as e:
             parsing_error = True
             st.error(f"Syntax Error in generated code: {e}")
@@ -364,8 +398,7 @@ if st.session_state.get('res_final'):
                                 else:
                                     st.error("Function `run_agent` not found in generated code.")
                             except ModuleNotFoundError as e:
-                                st.error(f"Missing Library: {str(e)}")
-                                st.info("The agent needs a library not currently installed.")
+                                st.error(f"Runtime Missing Module: {str(e)}")
                             except Exception as e:
                                 st.error(f"Runtime Error: {str(e)}")
                                 st.code(traceback.format_exc())
