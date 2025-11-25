@@ -6,6 +6,7 @@ from typing import TypedDict, List, Union, Dict, Any
 import inspect
 import subprocess
 import sys
+from pydantic import BaseModel, Field
 
 # --- Third-party Imports ---
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -181,7 +182,7 @@ def node_architect(state: AgentState):
         
         4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
         
-        5. IMPORTS: Include `from typing import Dict, List, Any`.
+        5. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field`.
         
         - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
         """
@@ -246,7 +247,7 @@ def node_code_reviewer(state: AgentState):
         
         5. Assume `langchain_community` is installed.
         6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
-        7. IMPORTS: Include `from typing import Dict, List, Any` at the top.
+        7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top.
         8. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
