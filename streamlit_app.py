@@ -15,6 +15,7 @@ This agent builds other agents! Describe what you want, and the pipeline will:
 2. **Draft Initial Code** 🏗️
 3. **Identify APIs** 🔌
 4. **Finalize & Polish Code** ✨
+5. **Run the Agent** ⚡
 """)
 
 # --- Sidebar: Configuration ---
@@ -87,10 +88,15 @@ def node_architect(state: AgentState):
     {state['requirements']}
     
     Write the Python code to implement this using `langgraph` and `langchain_google_genai`.
-    - Define the TypedDict State.
-    - Define the Nodes.
-    - Define the Graph compilation.
-    - Do not worry about specific API keys yet, use placeholders.
+    
+    CRITICAL ARCHITECTURE RULE:
+    The code MUST be wrapped in a function named `def run_agent(user_input: str, api_key: str) -> str:`
+    - This function should define the State, Nodes, and Graph.
+    - It should compile the graph.
+    - It should invoke the graph with the `user_input`.
+    - It should return the final string result.
+    
+    - Use `ChatGoogleGenerativeAI` with `google_api_key=api_key` passed from the function argument.
     """
     
     response = llm.invoke([HumanMessage(content=prompt)])
@@ -108,7 +114,7 @@ def node_api_specialist(state: AgentState):
     Review this initial code draft:
     {state['initial_code']}
     
-    1. List what specific external APIs are needed (e.g., Google Search, Weather API, Database) based on the user request: "{state['user_request']}".
+    1. List what specific external APIs are needed based on the user request: "{state['user_request']}".
     2. Suggest how to integrate them into the existing nodes.
     """
     
@@ -130,11 +136,17 @@ def node_code_reviewer(state: AgentState):
     - Draft Code: {state['initial_code']}
     - API Suggestions: {state['api_needs']}
     
-    Instructions:
-    1. Merge the API logic into the draft code.
-    2. Ensure all imports are correct (langgraph, langchain, etc.).
-    3. Add comments explaining how to run it.
-    4. OUTPUT ONLY THE PYTHON CODE. No markdown backticks, no conversational text before or after.
+    STRICT REQUIREMENTS:
+    1. The code MUST be self-contained (imports at top).
+    2. The code MUST define a function exactly like this:
+       `def run_agent(user_input: str, api_key: str) -> str:`
+    3. Inside `run_agent`:
+       - Initialize `ChatGoogleGenerativeAI(google_api_key=api_key, ...)`
+       - Define the State, Nodes, and Workflow.
+       - Compile and run the workflow.
+       - Return the final text output.
+    4. Do not use `input()` or `print()` for interaction inside the function.
+    5. OUTPUT ONLY THE PYTHON CODE. No markdown backticks.
     """
     
     response = llm.invoke([HumanMessage(content=prompt)])
@@ -174,7 +186,7 @@ if start_btn:
         workflow.add_node("reviewer", node_code_reviewer)
 
         # Add Edges
-        workflow.set_entry_point("analyst") # Fixed: Added Entry Point
+        workflow.set_entry_point("analyst")
         workflow.add_edge("analyst", "architect")
         workflow.add_edge("architect", "api_specialist")
         workflow.add_edge("api_specialist", "reviewer")
@@ -214,30 +226,63 @@ if start_btn:
 
             status_container.update(label="Agent Generation Complete!", state="complete", expanded=False)
 
-            # --- Display Results ---
-            st.divider()
-            
-            # Use tabs for clean organization
-            tab1, tab2, tab3, tab4 = st.tabs(["Final Code 🚀", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
-            
-            with tab1:
-                st.subheader("Your Custom Agent Code")
-                st.code(st.session_state.get('res_final', ''), language='python')
-                st.download_button(
-                    label="Download Python File",
-                    data=st.session_state.get('res_final', ''),
-                    file_name="my_new_agent.py",
-                    mime="text/x-python"
-                )
-
-            with tab2:
-                st.markdown(st.session_state.get('res_req', 'Processing...'))
-
-            with tab3:
-                st.code(st.session_state.get('res_draft', 'Processing...'), language='python')
-                
-            with tab4:
-                st.markdown(st.session_state.get('res_api', 'Processing...'))
-
         except Exception as e:
             st.error(f"An error occurred: {e}")
+
+# --- Result Display & Dynamic Execution ---
+if st.session_state.get('res_final'):
+    st.divider()
+    
+    # Use tabs for clean organization
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡ Test Agent", "Final Code 🚀", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
+    
+    with tab1:
+        st.subheader("Interactive Agent Playground")
+        st.info("The agent code has been loaded into memory. Try it out below!")
+        
+        test_query = st.text_input("Talk to your new agent:", placeholder="Enter a query for the agent you just built...")
+        
+        if st.button("Run Agent"):
+            if not test_query:
+                st.warning("Please enter a query.")
+            else:
+                with st.spinner("Running your custom agent..."):
+                    try:
+                        # 1. Prepare execution namespace
+                        local_scope = {}
+                        generated_code = st.session_state['res_final']
+                        
+                        # 2. Execute the code string to define functions
+                        # We pass 'globals()' to ensure it can access installed libraries
+                        exec(generated_code, globals(), local_scope)
+                        
+                        # 3. Check for the specific entry point function we requested
+                        if 'run_agent' in local_scope:
+                            # 4. Run the function
+                            result = local_scope['run_agent'](test_query, api_key)
+                            st.success("Result:")
+                            st.write(result)
+                        else:
+                            st.error("The generated code did not define the required `run_agent` function. Please regenerate.")
+                    except Exception as e:
+                        st.error(f"Execution Error: {str(e)}")
+                        st.markdown("Try checking the 'Final Code' tab to see if there are syntax errors.")
+
+    with tab2:
+        st.subheader("Your Custom Agent Code")
+        st.code(st.session_state.get('res_final', ''), language='python')
+        st.download_button(
+            label="Download Python File",
+            data=st.session_state.get('res_final', ''),
+            file_name="my_new_agent.py",
+            mime="text/x-python"
+        )
+
+    with tab3:
+        st.markdown(st.session_state.get('res_req', 'Processing...'))
+
+    with tab4:
+        st.code(st.session_state.get('res_draft', 'Processing...'), language='python')
+        
+    with tab5:
+        st.markdown(st.session_state.get('res_api', 'Processing...'))
