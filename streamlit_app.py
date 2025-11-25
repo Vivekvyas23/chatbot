@@ -91,17 +91,43 @@ def extract_code(text: str) -> str:
     except Exception:
         return text
 
-def install_missing_package(package_name: str):
-    """Attempts to install a missing package via pip."""
+# Mapping of common import names to their actual PyPI package names
+PACKAGE_MAPPING = {
+    "bs4": "beautifulsoup4",
+    "sklearn": "scikit-learn",
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "dotenv": "python-dotenv",
+    "yaml": "PyYAML",
+    "dateutil": "python-dateutil"
+}
+
+def install_missing_package(import_name: str):
+    """Attempts to install a missing package via pip, handling aliases."""
     try:
+        # Resolve the actual package name from the import name
+        package_name = PACKAGE_MAPPING.get(import_name, import_name)
+        
         # Security check: basic sanitization to prevent command injection
         if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
-            raise ValueError("Invalid package name")
+            raise ValueError(f"Invalid package name: {package_name}")
             
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
+        st.info(f"Attempting to install `{package_name}`...")
+        
+        # Use subprocess.run to capture output for better debugging
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", package_name],
+            capture_output=True,
+            text=True
+        )
+        
+        if result.returncode != 0:
+            st.error(f"Pip Install Failed for `{package_name}`:\n\n{result.stderr}")
+            return False
+            
         return True
     except Exception as e:
-        st.error(f"Failed to install {package_name}: {e}")
+        st.error(f"System Error during install of {package_name}: {e}")
         return False
 
 # --- Node Logic ---
