@@ -162,6 +162,7 @@ if start_btn:
         workflow.add_node("reviewer", node_code_reviewer)
 
         # Add Edges
+        workflow.set_entry_point("analyst") # Fixed: Added Entry Point
         workflow.add_edge("analyst", "architect")
         workflow.add_edge("architect", "api_specialist")
         workflow.add_edge("api_specialist", "reviewer")
