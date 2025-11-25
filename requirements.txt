@@ -1,2 +1,5 @@
 streamlit
-openai
+langchain-google-genai
+langchain-core
+langgraph
+python-dotenv
