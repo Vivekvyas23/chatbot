@@ -1,8 +1,13 @@
 import streamlit as st
 import os
-from typing import TypedDict, List
+import re
+import traceback
+from typing import TypedDict, List, Union
+import inspect
+
+# --- Third-party Imports ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.graph import StateGraph, END
 
 # --- Streamlit UI Configuration ---
@@ -22,7 +27,7 @@ This agent builds other agents! Describe what you want, and the pipeline will:
 with st.sidebar:
     st.header("Configuration")
     api_key = st.text_input("Enter Google Gemini API Key", type="password")
-    # Updated model names to include 2.5 flash and other variants
+    
     model_options = [
         "gemini-2.5-flash-preview-09-2025",
         "gemini-2.0-flash-exp",
@@ -45,134 +50,168 @@ class AgentState(TypedDict):
     initial_code: str
     api_needs: str
     final_code: str
-    # We keep a log of steps for the UI
     steps_log: List[str]
+    error: str
 
-# --- Node Logic ---
+# --- Helper Functions ---
 
 def get_llm(api_key, model):
     if not api_key:
         return None
     return ChatGoogleGenerativeAI(model=model, google_api_key=api_key, temperature=0.7)
 
+def get_content_string(response_content: Union[str, List]) -> str:
+    """Helper to handle if LLM returns a list of content parts instead of a string."""
+    try:
+        if isinstance(response_content, str):
+            return response_content
+        if isinstance(response_content, list):
+            return "".join([str(item) for item in response_content])
+        return str(response_content)
+    except Exception as e:
+        return f"Error parsing content: {str(e)}"
+
+def extract_code(text: str) -> str:
+    """Robustly extracts Python code from Markdown text using Regex."""
+    try:
+        # We split the string concatenation to avoid confusing the markdown parser
+        # The pattern looks for triple backticks enclosing content
+        code_block_pattern = r"``" + r"`(?:python)?\s*(.*?)``" + r"`"
+        matches = re.findall(code_block_pattern, text, re.DOTALL)
+        if matches:
+            return matches[-1].strip()
+        
+        # Fallback: Check if it looks like code
+        if "def " in text or "import " in text:
+            return text.strip()
+        
+        return ""
+    except Exception:
+        return text
+
+# --- Node Logic ---
+
 def node_requirements_analyst(state: AgentState):
-    """Step 1: Analyzes user request and creates a requirement outline."""
-    llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
-    
-    prompt = f"""
-    You are an expert AI Systems Analyst. 
-    Analyze the following user request for a new AI Agent:
-    "{state['user_request']}"
-    
-    Create a detailed technical requirement outline. 
-    Specificy:
-    1. The Goal of the agent.
-    2. The necessary Nodes (functions) required in the graph.
-    3. The flow of data (Edges).
-    4. What information needs to be stored in the State.
-    5. ANY external API keys needed (e.g., SendGrid, Spotify, OpenAI).
-    """
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {
-        "requirements": response.content,
-        "steps_log": ["Requirements Analysis Complete"]
-    }
+    """Step 1: Analyzes user request."""
+    try:
+        llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+        prompt = f"""
+        You are an expert AI Systems Analyst. 
+        Analyze the following user request for a new AI Agent:
+        "{state['user_request']}"
+        
+        Create a detailed technical requirement outline. 
+        Specify:
+        1. The Goal of the agent.
+        2. The necessary Nodes (functions) required in the graph.
+        3. The flow of data (Edges).
+        4. What information needs to be stored in the State.
+        5. ANY external API keys needed (e.g., SendGrid, Spotify, OpenAI).
+        """
+        response = llm.invoke([HumanMessage(content=prompt)])
+        content = get_content_string(response.content)
+        return {"requirements": content, "steps_log": ["Requirements Analysis Complete"]}
+    except Exception as e:
+        return {"error": f"Analyst Error: {str(e)}", "steps_log": ["Requirements Analysis Failed"]}
 
 def node_architect(state: AgentState):
-    """Step 2: Writes the initial LangGraph code based on requirements."""
-    llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+    """Step 2: Writes the initial LangGraph code."""
+    if state.get("error"): return {}
     
-    prompt = f"""
-    You are a Senior Python Developer specializing in LangGraph and LangChain.
-    Based on these requirements:
-    {state['requirements']}
-    
-    Write the Python code to implement this using `langgraph` and `langchain_google_genai`.
-    
-    CRITICAL ARCHITECTURE RULE:
-    1. The code MUST be wrapped in a function: 
-       `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
-    
-    2. Any external API keys must be retrieved from the `secrets` dictionary.
-       Example: `weather_key = secrets.get("WEATHER_API_KEY")`
-    
-    3. Define a helper function to list required keys:
-       `def get_required_api_keys() -> list[str]:`
-       Example: return ["WEATHER_API_KEY"]
-    
-    - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
-    """
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {
-        "initial_code": response.content,
-        "steps_log": ["Initial Code Drafted"]
-    }
+    try:
+        llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+        prompt = f"""
+        You are a Senior Python Developer specializing in LangGraph and LangChain.
+        Based on these requirements:
+        {state['requirements']}
+        
+        Write the Python code to implement this using `langgraph` and `langchain_google_genai`.
+        
+        CRITICAL ARCHITECTURE RULE:
+        1. The code MUST be wrapped in a function: 
+        `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
+        
+        2. Any external API keys must be retrieved from the `secrets` dictionary.
+        Example: `weather_key = secrets.get("WEATHER_API_KEY")`
+        
+        3. Define a helper function to list required keys:
+        `def get_required_api_keys() -> list[str]:`
+        Example: return ["WEATHER_API_KEY"]
+        
+        - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
+        """
+        response = llm.invoke([HumanMessage(content=prompt)])
+        content = get_content_string(response.content)
+        return {"initial_code": content, "steps_log": ["Initial Code Drafted"]}
+    except Exception as e:
+        return {"error": f"Architect Error: {str(e)}", "steps_log": ["Architecture Failed"]}
 
 def node_api_specialist(state: AgentState):
-    """Step 3: Identifies missing APIs and adds integration logic."""
-    llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+    """Step 3: Identifies missing APIs."""
+    if state.get("error"): return {}
     
-    prompt = f"""
-    You are a Backend Integration Specialist.
-    Review this initial code draft:
-    {state['initial_code']}
-    
-    1. List what specific external APIs are needed based on the user request: "{state['user_request']}".
-    2. Explicitly list the VARIABLE NAMES for these keys (e.g., 'SENDGRID_API_KEY').
-    3. Suggest how to integrate them into the `secrets` dictionary pattern.
-    """
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    return {
-        "api_needs": response.content,
-        "steps_log": ["API Dependencies Identified"]
-    }
+    try:
+        llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+        prompt = f"""
+        You are a Backend Integration Specialist.
+        Review this initial code draft:
+        {state['initial_code']}
+        
+        1. List what specific external APIs are needed based on the user request: "{state['user_request']}".
+        2. Explicitly list the VARIABLE NAMES for these keys (e.g., 'SENDGRID_API_KEY').
+        3. Suggest how to integrate them into the `secrets` dictionary pattern.
+        """
+        response = llm.invoke([HumanMessage(content=prompt)])
+        content = get_content_string(response.content)
+        return {"api_needs": content, "steps_log": ["API Dependencies Identified"]}
+    except Exception as e:
+        return {"error": f"API Specialist Error: {str(e)}", "steps_log": ["API Analysis Failed"]}
 
 def node_code_reviewer(state: AgentState):
     """Step 4: Merges everything and outputs clean, runnable code."""
-    llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
-    
-    prompt = f"""
-    You are a Lead Code Reviewer. 
-    Your goal is to produce the FINAL, RUNNABLE Python file.
-    
-    Inputs:
-    - Draft Code: {state['initial_code']}
-    - API Suggestions: {state['api_needs']}
-    
-    STRICT REQUIREMENTS:
-    1. The code MUST be self-contained (imports at top).
-    
-    2. DEFINE THIS EXACT FUNCTION SIGNATURE for the main entry point:
-       `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
-       
-    3. DEFINE THIS HELPER FUNCTION:
-       `def get_required_api_keys() -> list[str]:`
-       - It must return a list of strings of the keys needed (e.g., ["SENDGRID_API_KEY"]).
-       - If no extra keys are needed, return [].
-       
-    4. Inside `run_agent`:
-       - Initialize `ChatGoogleGenerativeAI(google_api_key=llm_api_key, ...)`
-       - Access third-party keys via `secrets.get("KEY_NAME")`.
-       - Define the State, Nodes, and Workflow.
-       - Compile and run the workflow.
-       - Return the final text output.
-       
-    5. Assume `langchain_community` is installed.
-    6. OUTPUT ONLY THE PYTHON CODE. No markdown backticks.
-    """
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    
-    # Simple cleanup to remove markdown code blocks if the LLM adds them despite instructions
-    clean_code = response.content.replace("```python", "").replace("```", "").strip()
-    
-    return {
-        "final_code": clean_code,
-        "steps_log": ["Final Code Generated"]
-    }
+    if state.get("error"): return {}
+
+    try:
+        llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
+        prompt = f"""
+        You are a Lead Code Reviewer. 
+        Your goal is to produce the FINAL, RUNNABLE Python file.
+        
+        Inputs:
+        - Draft Code: {state['initial_code']}
+        - API Suggestions: {state['api_needs']}
+        
+        STRICT REQUIREMENTS:
+        1. The code MUST be self-contained (imports at top).
+        
+        2. DEFINE THIS EXACT FUNCTION SIGNATURE for the main entry point:
+        `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
+        
+        3. DEFINE THIS HELPER FUNCTION:
+        `def get_required_api_keys() -> list[str]:`
+        - It must return a list of strings of the keys needed (e.g., ["SENDGRID_API_KEY"]).
+        - If no extra keys are needed, return [].
+        
+        4. Inside `run_agent`:
+        - Initialize `ChatGoogleGenerativeAI(google_api_key=llm_api_key, ...)`
+        - Access third-party keys via `secrets.get("KEY_NAME")`.
+        - Define the State, Nodes, and Workflow.
+        - Compile and run the workflow.
+        - Return the final text output.
+        
+        5. Assume `langchain_community` is installed.
+        6. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
+        """
+        response = llm.invoke([HumanMessage(content=prompt)])
+        content = get_content_string(response.content)
+        
+        clean_code = extract_code(content)
+        if not clean_code:
+            clean_code = content.replace("```python", "").replace("```", "").strip()
+
+        return {"final_code": clean_code, "steps_log": ["Final Code Generated"]}
+    except Exception as e:
+        return {"error": f"Reviewer Error: {str(e)}", "steps_log": ["Code Generation Failed"]}
 
 # --- Main App Logic ---
 
@@ -187,9 +226,14 @@ if start_btn:
     elif not user_input:
         st.warning("Please describe your agent first.")
     else:
-        # Store config in session state for nodes to access
+        # Store config
         st.session_state["api_key"] = api_key
         st.session_state["model"] = model_name
+        
+        # Reset previous results
+        for key in ['res_req', 'res_draft', 'res_api', 'res_final', 'res_error']:
+            if key in st.session_state:
+                del st.session_state[key]
 
         # --- Build the Graph ---
         workflow = StateGraph(AgentState)
@@ -219,89 +263,112 @@ if start_btn:
             "initial_code": "", 
             "api_needs": "", 
             "final_code": "",
-            "steps_log": []
+            "steps_log": [],
+            "error": ""
         }
         
         try:
             # Stream the updates
             for output in app.stream(initial_state):
                 for key, value in output.items():
-                    if "steps_log" in value:
+                    if "steps_log" in value and value["steps_log"]:
                         status_container.write(f"✅ {value['steps_log'][0]}")
                     
-                    # Store intermediate results to display later
-                    if "requirements" in value:
-                        st.session_state['res_req'] = value['requirements']
-                    if "initial_code" in value:
-                        st.session_state['res_draft'] = value['initial_code']
-                    if "api_needs" in value:
-                        st.session_state['res_api'] = value['api_needs']
-                    if "final_code" in value:
-                        st.session_state['res_final'] = value['final_code']
+                    if "error" in value and value["error"]:
+                        st.session_state['res_error'] = value['error']
+                        status_container.update(label="Error Occurred", state="error")
+                        st.error(value['error'])
+                        break
 
-            status_container.update(label="Agent Generation Complete!", state="complete", expanded=False)
+                    if "requirements" in value: st.session_state['res_req'] = value['requirements']
+                    if "initial_code" in value: st.session_state['res_draft'] = value['initial_code']
+                    if "api_needs" in value: st.session_state['res_api'] = value['api_needs']
+                    if "final_code" in value: st.session_state['res_final'] = value['final_code']
+
+            if not st.session_state.get('res_error'):
+                status_container.update(label="Agent Generation Complete!", state="complete", expanded=False)
 
         except Exception as e:
-            st.error(f"An error occurred: {e}")
+            st.error(f"Critical System Error: {str(e)}")
+            st.code(traceback.format_exc())
 
 # --- Result Display & Dynamic Execution ---
 if st.session_state.get('res_final'):
     st.divider()
     
-    # Use tabs for clean organization
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡ Test Agent", "Final Code 🚀", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
     
     with tab1:
         st.subheader("Interactive Agent Playground")
         st.info("The agent code has been loaded into memory. Try it out below!")
         
-        # 1. Prepare execution namespace & Parse Keys
         local_scope = {}
         generated_code = st.session_state['res_final']
         required_keys = []
+        parsing_error = False
         
         try:
+            # Pre-load common modules
+            import langchain_community
+            import langchain_core
+            import langchain_google_genai
+            import langgraph
+            
             exec(generated_code, globals(), local_scope)
+            
             if 'get_required_api_keys' in local_scope:
-                required_keys = local_scope['get_required_api_keys']()
-        except Exception as e:
-            st.error(f"Error parsing agent code: {e}")
-
-        # 2. Collect Secrets
-        user_secrets = {}
-        if required_keys:
-            st.warning(f"This agent requires external API keys: {', '.join(required_keys)}")
-            for key_name in required_keys:
-                user_secrets[key_name] = st.text_input(f"Enter {key_name}", type="password")
-
-        # 3. Run Agent
-        test_query = st.text_input("Talk to your new agent:", placeholder="Enter a query for the agent you just built...")
-        
-        if st.button("Run Agent"):
-            if not test_query:
-                st.warning("Please enter a query.")
+                try:
+                    required_keys = local_scope['get_required_api_keys']()
+                except Exception as e:
+                    st.warning(f"Could not automatically detect API keys: {e}")
             else:
-                # Check if all keys are provided
-                missing_keys = [k for k in required_keys if not user_secrets.get(k)]
-                if missing_keys:
-                    st.error(f"Missing keys: {', '.join(missing_keys)}")
+                st.warning("Agent code structure incomplete: missing `get_required_api_keys`.")
+                
+        except SyntaxError as e:
+            parsing_error = True
+            st.error(f"Syntax Error in generated code: {e}")
+            st.markdown("Check the 'Final Code' tab. The AI might have included text outside the code block.")
+        except Exception as e:
+            parsing_error = True
+            st.error(f"Error loading agent: {e}")
+
+        if not parsing_error:
+            user_secrets = {}
+            if required_keys:
+                st.warning(f"This agent requires external API keys: {', '.join(required_keys)}")
+                for key_name in required_keys:
+                    val = st.text_input(f"Enter {key_name}", type="password", key=f"secret_{key_name}")
+                    user_secrets[key_name] = val
+
+            test_query = st.text_input("Talk to your new agent:", placeholder="Enter a query...")
+            
+            if st.button("Run Agent"):
+                if not test_query:
+                    st.warning("Please enter a query.")
                 else:
-                    with st.spinner("Running your custom agent..."):
-                        try:
-                            # 4. Check for the specific entry point function we requested
-                            if 'run_agent' in local_scope:
-                                # 5. Run the function with secrets
-                                result = local_scope['run_agent'](test_query, api_key, user_secrets)
-                                st.success("Result:")
-                                st.write(result)
-                            else:
-                                st.error("The generated code did not define the required `run_agent` function. Please regenerate.")
-                        except ModuleNotFoundError as e:
-                            st.error(f"Missing Dependency Error: {str(e)}")
-                            st.info("It seems the generated agent needs a library that isn't installed. Please check 'requirements.txt' and ensure `langchain_community` or other requested libraries are added.")
-                        except Exception as e:
-                            st.error(f"Execution Error: {str(e)}")
-                            st.markdown("Try checking the 'Final Code' tab to see if there are syntax errors.")
+                    missing_keys = [k for k in required_keys if not user_secrets.get(k)]
+                    if missing_keys:
+                        st.error(f"Missing keys: {', '.join(missing_keys)}")
+                    else:
+                        with st.spinner("Running your custom agent..."):
+                            try:
+                                if 'run_agent' in local_scope:
+                                    sig = inspect.signature(local_scope['run_agent'])
+                                    if 'secrets' in sig.parameters:
+                                        result = local_scope['run_agent'](test_query, api_key, user_secrets)
+                                    else:
+                                        result = local_scope['run_agent'](test_query, api_key)
+                                        
+                                    st.success("Result:")
+                                    st.write(result)
+                                else:
+                                    st.error("Function `run_agent` not found in generated code.")
+                            except ModuleNotFoundError as e:
+                                st.error(f"Missing Library: {str(e)}")
+                                st.info("The agent needs a library not currently installed.")
+                            except Exception as e:
+                                st.error(f"Runtime Error: {str(e)}")
+                                st.code(traceback.format_exc())
 
     with tab2:
         st.subheader("Your Custom Agent Code")
