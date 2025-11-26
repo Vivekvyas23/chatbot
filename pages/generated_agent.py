@@ -1,309 +1,239 @@
-# --- INSTALLATION REQUIREMENTS ---
-# pip install streamlit langgraph langchain-openai
-# ---------------------------------
+# --- Installation Requirements ---
+# pip install streamlit langgraph langchain-google-genai pydantic
+# Note: Pydantic is required for structured output models (BaseModel, Field).
 
 import streamlit as st
 import os
 from typing import TypedDict, List
 from langgraph.graph import StateGraph, END
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import SystemMessage, HumanMessage
-import json
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+# CRITICAL: Using pydantic_v1 for structured output schema definition, 
+# which is the standard mechanism in langchain_core for reliable schema passing to LLMs.
+from langchain_core.pydantic_v1 import BaseModel, Field
 
-# --- 1. State Management Definition (Required by LangGraph) ---
+# --- 1. State Definition ---
+
+class TouristSpots(BaseModel):
+    """Pydantic model for structured extraction of tourist spots."""
+    spots: List[str] = Field(description="A list of exactly 3 highly-rated or popular tourist attractions relevant to the destination.")
 
 class TravelAgentState(TypedDict):
-    """
-    Represents the state of the Smart Travel Agent during execution.
-    """
+    """Represents the state of our sequential travel planning process."""
     destination: str
-    tourist_spots: List[str]
+    spots_list: List[str]
     itinerary_text: str
-    estimated_budget: str
-    error_message: str
+    budget_string: str
+    current_status: str # Used for tracking progress
 
-# --- Streamlit UI Setup (Sidebar for API Keys) ---
+# --- 2. LLM Initialization and Caching ---
 
-st.set_page_config(page_title="Smart Travel Agent (LangGraph)", layout="wide")
-st.title("🌍 Smart Travel Agent")
-st.caption("Powered by LangGraph and Streamlit. Transforms a destination into a detailed 1-day travel plan.")
-
-# Sidebar for API Key Collection
-with st.sidebar:
-    st.header("Configuration")
-    openai_api_key = st.text_input("OpenAI API Key", type="password", help="Required for all LLM processing.")
-    
-    if openai_api_key:
-        os.environ["OPENAI_API_KEY"] = openai_api_key
-        st.success("OpenAI Key Loaded.")
-    else:
-        st.warning("Please enter your OpenAI API Key to run the agent.")
-
-# --- 2. Node Functions (Processing Logic) ---
-
-def initialize_llm():
-    """Initializes the LLM based on the API key."""
-    # Ensure the key is set in the environment before initialization
-    if "OPENAI_API_KEY" not in os.environ or not os.environ["OPENAI_API_KEY"]:
-        # Fallback check if the user cleared the input after initialization
-        if not openai_api_key:
-            st.error("OpenAI API key is missing.")
-            return None
+@st.cache_resource
+def get_llm(api_key: str):
+    """Initializes and caches the ChatGoogleGenerativeAI model."""
+    if not api_key:
+        return None
     try:
-        # Using a powerful model for complex reasoning and structured output
-        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
+        # Using gemini-2.5-flash for a balance of speed and capability
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key,
+            temperature=0.4
+        )
         return llm
     except Exception as e:
-        st.error(f"Error initializing LLM: {e}")
+        st.error(f"Failed to initialize LLM: {e}")
         return None
 
-def scout_locations(state: TravelAgentState) -> dict:
-    """
-    Node 1: Identifies 3 distinct tourist spots for the given destination,
-    using robust JSON output parsing.
-    """
-    destination = state["destination"]
-    llm = initialize_llm()
-    if not llm: return {"error_message": "LLM initialization failed."}
+# --- 3. Node Definitions (LLM Agents) ---
 
-    st.info(f"🔍 Scouting top 3 locations in {destination}...")
-
-    # Configure LLM for strict JSON output using the OpenAI API parameter
-    llm_json = llm.with_config({"response_format": {"type": "json_object"}})
+def scout_locations(state: TravelAgentState) -> TravelAgentState:
+    """Node 1: Identifies 3 highly-rated tourist spots."""
+    st.info(f"📍 Node running: Scouting locations for {state['destination']}...")
+    llm = st.session_state.llm
     
-    system_prompt = (
-        "You are an expert travel scout. Your task is to identify the top 3 highly-rated and distinct "
-        "tourist spots (e.g., historical, natural, cultural) for the given destination. "
-        "You MUST output the result as a JSON list of strings, with no extra text. "
-        "Example output: [\"Spot A\", \"Spot B\", \"Spot C\"]"
-    )
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an expert travel researcher. Identify exactly 3 highly-rated or popular tourist attractions/spots relevant to the user's destination. Respond ONLY with the JSON object."),
+        ("human", f"Destination: {state['destination']}")
+    ])
     
-    prompt = f"Destination: {destination}. Provide the 3 best spots."
-
-    response = None # Initialize response for error handling scope
+    chain = prompt | llm.with_structured_output(TouristSpots)
+    
     try:
-        response = llm_json.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=prompt)
-        ])
-        
-        # Since response_format is set, the content should be clean JSON
-        spots = json.loads(response.content)
-        
-        # Basic validation
-        if not isinstance(spots, list) or len(spots) == 0:
-            raise ValueError("LLM failed to return a valid JSON list of spots.")
-            
-        return {"tourist_spots": spots}
-
-    except Exception as e:
-        raw_content = response.content if response else "N/A"
-        return {"error_message": f"Error in scout_locations (JSON parsing): {e}. Raw content: {raw_content[:100]}..."}
-
-
-def plan_itinerary(state: TravelAgentState) -> dict:
-    """
-    Node 2: Generates a logical, time-based, 1-day itinerary.
-    """
-    destination = state["destination"]
-    tourist_spots = state["tourist_spots"]
-    llm = initialize_llm()
-    if not llm: return {"error_message": "LLM initialization failed."}
-
-    # Handle case where scouting failed but flow continued
-    if not tourist_spots:
-        return {"error_message": "Itinerary planning skipped because no tourist spots were identified."}
-
-    st.info("🗓️ Planning the 1-day itinerary...")
-
-    spot_list = "\n- " + "\n- ".join(tourist_spots)
-
-    system_prompt = (
-        "You are a meticulous travel planner. Generate a detailed, time-based, 1-day itinerary "
-        "from 8:00 AM to 6:00 PM utilizing ALL the provided tourist spots in a logical order. "
-        "Include suggested transition times (e.g., transit/walking) between locations. "
-        "Format the output clearly using Markdown headings and bullet points."
-    )
-    
-    prompt = (
-        f"Destination: {destination}\n"
-        f"Spots to include:\n{spot_list}"
-    )
-
-    try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=prompt)
-        ])
-        return {"itinerary_text": response.content}
-    except Exception as e:
-        return {"error_message": f"Error in plan_itinerary: {e}"}
-
-
-def budget_estimator(state: TravelAgentState) -> dict:
-    """
-    Node 3: Calculates a rough cost estimate for the day.
-    """
-    destination = state["destination"]
-    itinerary_text = state["itinerary_text"]
-    llm = initialize_llm()
-    if not llm: return {"error_message": "LLM initialization failed."}
-
-    # Handle case where itinerary failed but flow continued
-    if not itinerary_text or itinerary_text == "Running...":
-        return {"error_message": "Budget estimation skipped because the itinerary text is missing or incomplete."}
-
-    st.info("💰 Estimating the budget...")
-
-    system_prompt = (
-        "You are a financial analyst specializing in travel costs. Analyze the destination and the provided itinerary. "
-        "Calculate a rough cost estimate for the entire day. This must include estimated entry fees for the locations, "
-        "rough local transit costs, and a small allowance ($15-$25 equivalent) for miscellaneous expenses (e.g., coffee/snack). "
-        "Provide the final output as a single, clear, formatted string (e.g., '€120 - €160 EUR'). "
-        "Do not include any other explanatory text."
-    )
-    
-    prompt = (
-        f"Destination: {destination}\n"
-        f"Itinerary:\n---\n{itinerary_text}\n---\n"
-        "Provide the rough total cost estimate for this plan."
-    )
-
-    try:
-        response = llm.invoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=prompt)
-        ])
-        return {"estimated_budget": response.content.strip()}
-    except Exception as e:
-        return {"error_message": f"Error in budget_estimator: {e}"}
-
-
-# --- 3. Main UI and Execution Logic ---
-
-# Initialize output placeholders
-if 'plan_output' not in st.session_state:
-    st.session_state.plan_output = {
-        "tourist_spots": [],
-        "itinerary_text": "Plan not generated yet.",
-        "estimated_budget": "N/A",
-        "error_message": ""
-    }
-
-# Input Field
-destination_input = st.text_input(
-    "Where are you traveling for a single day?", 
-    placeholder="e.g., Rome, Italy or Kyoto, Japan"
-)
-
-# Execution Button
-if st.button("Generate Travel Plan", type="primary"):
-    
-    # 1. Pre-check requirements
-    if not openai_api_key:
-        st.error("Please provide the OpenAI API Key in the sidebar.")
-    elif not destination_input:
-        st.error("Please enter a destination.")
-    else:
-        # Reset state for new run
-        st.session_state.plan_output = {
-            "tourist_spots": [],
-            "itinerary_text": "Running...",
-            "estimated_budget": "Running...",
-            "error_message": ""
+        response = chain.invoke({})
+        return {
+            "spots_list": response.spots,
+            "current_status": "Locations scouted successfully."
         }
+    except Exception as e:
+        st.error(f"Error in scout_locations: {e}")
+        return {"spots_list": ["Error scouting locations"], "current_status": "Failed scouting."}
+
+def plan_itinerary(state: TravelAgentState) -> TravelAgentState:
+    """Node 2: Creates a structured, detailed 1-day schedule."""
+    st.info("🗓️ Node running: Planning 1-day itinerary...")
+    llm = st.session_state.llm
+    
+    spots = ", ".join(state['spots_list'])
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a creative itinerary planner. Create a structured, detailed 1-day schedule (Morning, Afternoon, Evening) for the user's destination, making sure to incorporate the following 3 specific spots."),
+        ("human", f"Destination: {state['destination']}. Spots to include: {spots}. Format the output as a clean, easy-to-read text block with clear headings.")
+    ])
+    
+    chain = prompt | llm
+    
+    try:
+        response = chain.invoke({})
+        return {
+            "itinerary_text": response.content,
+            "current_status": "Itinerary planned successfully."
+        }
+    except Exception as e:
+        st.error(f"Error in plan_itinerary: {e}")
+        return {"itinerary_text": "Error generating itinerary.", "current_status": "Failed planning."}
+
+def budget_estimator(state: TravelAgentState) -> TravelAgentState:
+    """Node 3: Calculates a rough estimated cost for the itinerary."""
+    st.info("💰 Node running: Estimating budget...")
+    llm = st.session_state.llm
+    
+    itinerary = state['itinerary_text']
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are a financial analyst specializing in travel costs. Based on the provided destination and itinerary, calculate and format a rough, estimated cost breakdown (e.g., transportation, entrance fees, food) for one person for this 1-day trip. Provide a final summary cost in USD."),
+        ("human", f"Destination: {state['destination']}. Itinerary: {itinerary}")
+    ])
+    
+    chain = prompt | llm
+    
+    try:
+        response = chain.invoke({})
+        return {
+            "budget_string": response.content,
+            "current_status": "Budget estimated successfully."
+        }
+    except Exception as e:
+        st.error(f"Error in budget_estimator: {e}")
+        return {"budget_string": "Error estimating budget.", "current_status": "Failed budgeting."}
+
+# --- 4. Graph Construction ---
+
+def create_travel_agent_graph():
+    """Defines and compiles the sequential LangGraph workflow."""
+    workflow = StateGraph(TravelAgentState)
+    
+    # Add Nodes
+    workflow.add_node("scout_locations", scout_locations)
+    workflow.add_node("plan_itinerary", plan_itinerary)
+    workflow.add_node("budget_estimator", budget_estimator)
+    
+    # Define the sequential Edges (Start -> Scout -> Plan -> Budget -> End)
+    workflow.set_entry_point("scout_locations")
+    
+    workflow.add_edge("scout_locations", "plan_itinerary")
+    workflow.add_edge("plan_itinerary", "budget_estimator")
+    workflow.add_edge("budget_estimator", END)
+    
+    return workflow.compile()
+
+# --- 5. Streamlit Application ---
+
+def run_app():
+    st.set_page_config(page_title="Smart Travel Agent (STA)", layout="wide")
+    st.title("✈️ Smart Travel Agent (STA)")
+    st.caption("A sequential planning agent powered by LangGraph and Google Gemini.")
+
+    # --- Sidebar for Configuration ---
+    with st.sidebar:
+        st.header("Configuration")
+        api_key = st.text_input(
+            "Google Gemini API Key", 
+            type="password",
+            value=os.getenv("GEMINI_API_KEY") # Pre-populate if environment variable exists
+        )
         
-        # Use a spinner to show activity
-        with st.spinner("Executing Smart Travel Agent Graph..."):
-            
-            # 2. Define the Graph Structure
-            workflow = StateGraph(TravelAgentState)
-
-            # Add nodes
-            workflow.add_node("scout", scout_locations)
-            workflow.add_node("plan", plan_itinerary)
-            workflow.add_node("budget", budget_estimator)
-
-            # Define edges (Linear flow)
-            workflow.set_entry_point("scout")
-            workflow.add_edge("scout", "plan")
-            workflow.add_edge("plan", "budget")
-            workflow.add_edge("budget", END)
-
-            # Compile the graph
-            app = workflow.compile()
-
-            # 3. Initial State
-            initial_state = {
-                "destination": destination_input,
-                "tourist_spots": [],
-                "itinerary_text": "",
-                "estimated_budget": "",
-                "error_message": ""
-            }
-
-            # 4. Invoke the Graph
-            try:
-                # The graph executes sequentially
-                final_state = app.invoke(initial_state)
-                
-                # Update session state with the final result
-                st.session_state.plan_output = final_state
-                
-            except Exception as e:
-                # Catch unexpected graph execution errors
-                st.session_state.plan_output["error_message"] = f"Graph Execution Failed: {e}"
-
-# --- 4. Output Display ---
-
-output = st.session_state.plan_output
-
-if output["error_message"]:
-    st.error(f"Execution Error: {output['error_message']}")
-
-st.divider()
-st.header("✨ Your Smart Travel Plan")
-
-col1, col2 = st.columns([1, 2])
-
-# Output Panel: Tourist Spots
-with col1:
-    st.subheader("1. Top Tourist Spots")
-    if output["tourist_spots"]:
-        st.write("The agent identified these must-see locations:")
-        # Ensure output is displayed as a list if it's successfully parsed
-        if isinstance(output["tourist_spots"], list):
-            st.markdown(
-                "\n".join(f"- **{spot}**" for spot in output["tourist_spots"])
-            )
+        if api_key:
+            st.session_state.llm = get_llm(api_key)
+            st.success("LLM Initialized!")
         else:
-            st.write(str(output["tourist_spots"])) # Display raw content if parsing was weird
-    elif output["itinerary_text"] != "Running...":
-        st.warning("No spots identified yet.")
+            st.session_state.llm = None
+            st.warning("Please enter your Gemini API Key to run the agent.")
 
-# Output Panel: Itinerary
-with col2:
-    st.subheader("2. Detailed 1-Day Itinerary")
-    if output["itinerary_text"] and output["itinerary_text"] != "Running...":
-        st.markdown(output["itinerary_text"])
-    else:
-        st.write(output["itinerary_text"])
+    # --- Main UI and Execution Setup ---
+    
+    if 'graph' not in st.session_state:
+        st.session_state.graph = create_travel_agent_graph()
+    
+    if 'results' not in st.session_state:
+        st.session_state.results = None
 
-
-# Final Output Panel: Budget
-st.markdown("---")
-st.subheader("3. Estimated Budget Summary")
-
-if output["estimated_budget"] and output["estimated_budget"] != "Running...":
-    st.markdown(
-        f"""
-        <div style="padding: 15px; border-radius: 10px; background-color: #f0f2f6; border-left: 5px solid #1E90FF;">
-            <h4 style="margin: 0; color: #1E90FF;">Total Estimated Cost for the Day:</h4>
-            <p style="font-size: 24px; font-weight: bold; margin: 5px 0 0 0;">{output['estimated_budget']}</p>
-            <p style="font-size: 12px; color: gray;">(Includes entry fees, local transit, and miscellaneous allowance)</p>
-        </div>
-        """,
-        unsafe_allow_html=True
+    destination_input = st.text_input(
+        "Where are you planning to go?",
+        placeholder="e.g., Paris, France",
+        key="destination_input"
     )
-else:
-    st.write(output["estimated_budget"])
+
+    run_button = st.button(
+        "Generate 1-Day Travel Plan", 
+        disabled=not (st.session_state.llm and destination_input)
+    )
+
+    # --- Execution Logic ---
+    if run_button and st.session_state.llm and destination_input:
+        
+        # Initial State (Simulating the 'Start' node input)
+        initial_state = TravelAgentState(
+            destination=destination_input,
+            spots_list=[],
+            itinerary_text="",
+            budget_string="",
+            current_status="Starting travel plan generation..."
+        )
+        
+        st.session_state.results = None
+        
+        # Progress Indicator
+        status_placeholder = st.empty()
+        status_placeholder.info(f"Agent starting for: {destination_input}")
+        
+        try:
+            with st.spinner("Processing request through sequential nodes..."):
+                # Invoke the compiled graph
+                final_state = st.session_state.graph.invoke(initial_state)
+                st.session_state.results = final_state
+                
+                status_placeholder.empty()
+                st.success("✅ Travel Plan Generation Complete!")
+
+        except Exception as e:
+            status_placeholder.empty()
+            st.error(f"An error occurred during graph execution. Please check the API key and try again: {e}")
+            st.session_state.results = None
+
+    # --- Display Final Results ---
+    if st.session_state.results:
+        results = st.session_state.results
+        
+        st.header(f"Travel Plan for {results['destination']}")
+        
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.subheader("🗺️ Top Tourist Spots")
+            if results['spots_list']:
+                st.markdown(
+                    "\n".join([f"- **{spot}**" for spot in results['spots_list']])
+                )
+            else:
+                st.warning("Could not identify specific spots.")
+                
+            st.subheader("💲 Estimated Budget (1 Day)")
+            st.markdown(results['budget_string'])
+
+        with col2:
+            st.subheader("📅 Detailed 1-Day Itinerary")
+            st.markdown(results['itinerary_text'])
+
+if __name__ == "__main__":
+    run_app()

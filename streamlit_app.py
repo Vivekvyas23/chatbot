@@ -349,24 +349,23 @@ if st.session_state.get('res_final'):
                     with open(file_path, "w") as f:
                         f.write(code)
                     
-                    # Set flag and rerun to force Streamlit to recognize the new page
                     st.session_state['agent_deployed'] = True
+                    # Force refresh so file watcher catches the new page
                     st.rerun()
                     
                 except Exception as e:
                     st.error(f"Deployment error: {e}")
 
-        # Show the link only if deployed
         if st.session_state.get('agent_deployed', False):
-            st.success("Deployment successful! The agent is now in the sidebar.")
+            st.success("✅ Agent deployed!")
+            st.markdown("### 👉 Look at the sidebar on the left!")
+            st.markdown("You should see a page called **`generated_agent`**. Click it to run your new app.")
+            
+            # Attempt link, but fail gracefully if Streamlit isn't ready yet
             try:
-                # st.page_link is the modern, robust way to navigate
-                st.page_link("pages/generated_agent.py", label="👉 Click Here to Open Agent", icon="🤖", use_container_width=True)
-            except AttributeError:
-                # Fallback for older Streamlit versions
-                st.info("Look for 'generated_agent' in the sidebar navigation to the left.")
-            except Exception as e:
-                st.warning(f"Navigation link unavailable (check sidebar): {e}")
+                st.page_link("pages/generated_agent.py", label="Open Agent Directly", icon="🤖", use_container_width=True)
+            except Exception:
+                pass # User can use the sidebar
 
     with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
