@@ -326,16 +326,20 @@ if st.session_state.get('res_final'):
             )
             
         with col2:
-            if st.button("🚀 Auto-Deploy to Sidebar", type="primary", use_container_width=True):
+            if st.button("🚀 Deploy & Open Agent", type="primary", use_container_width=True):
                 try:
                     os.makedirs("pages", exist_ok=True)
                     file_path = os.path.join("pages", "generated_agent.py")
                     with open(file_path, "w") as f:
                         f.write(code)
-                    st.success("Deployed! Look at the sidebar 👈 for 'generated agent'.")
-                    st.info("If it doesn't appear instantly, try refreshing the page.")
+                    
+                    st.success("Deployed! Redirecting...")
+                    time.sleep(1) # Give file watcher a moment
+                    st.switch_page("pages/generated_agent.py")
+                    
                 except Exception as e:
-                    st.error(f"Failed to deploy: {e}")
+                    st.error(f"Deployment/Navigation error: {e}")
+                    st.info("If redirection fails, try clicking the button again or look for 'generated_agent' in the sidebar.")
 
     with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
