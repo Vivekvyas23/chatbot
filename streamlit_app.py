@@ -132,6 +132,15 @@ def sanitize_code(code: str) -> str:
         # Better to rely on the prompt fix below, but we can try to replace START with a placeholder string 
         # that might cause a clearer error, or just leave it.
         pass
+
+    # Fix 5: Remove non-existent BaseCheckpoint import from langgraph
+    # This fixes: ImportError: cannot import name 'BaseCheckpoint' from 'langgraph.checkpoint.base'
+    code = code.replace("from langgraph.checkpoint.base import BaseCheckpoint", "")
+    code = code.replace(", BaseCheckpoint", "")
+    code = code.replace("BaseCheckpoint, ", "")
+    # Replace usages
+    code = code.replace(": BaseCheckpoint", ": Any")
+    code = code.replace("-> BaseCheckpoint", "-> Any")
         
     return code
 
@@ -274,7 +283,7 @@ def node_code_reviewer(state: AgentState):
         6. **Structure**: Imports -> `st.set_page_config` -> Sidebar -> Classes/State -> Nodes -> Graph -> UI.
         7. **No `NameError`**: Define classes/functions before use.
         8. **LangGraph Check**: Verify `workflow.set_entry_point("node_name")` uses a STRING, NOT `START`.
-        9. **Forbidden Imports**: Do NOT import `AnyValue` from `langgraph.graph.message`. It does not exist.
+        9. **Forbidden Imports**: Do NOT import `AnyValue` from `langgraph.graph.message`. Do NOT import `BaseCheckpoint` from `langgraph.checkpoint.base`.
         10. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
