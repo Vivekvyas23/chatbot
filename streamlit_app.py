@@ -117,14 +117,20 @@ def sanitize_code(code: str) -> str:
         code = code.replace("from langchain_openai", "from langchain_google_genai")
         code = code.replace("ChatOpenAI", "ChatGoogleGenerativeAI")
     
-    # Fix 3: Auto-fix the "set_entry_point(START)" error if it appears
-    # Matches workflow.set_entry_point(START) and attempts to warn or fix (though tough with regex)
-    # Ideally, we fix this via prompt, but this is a fallback if literal string is found.
+    # Fix 3: Remove non-existent AnyValue import from langgraph (Common Hallucination)
+    # This fixes: ImportError: cannot import name 'AnyValue' from 'langgraph.graph.message'
+    code = code.replace("from langgraph.graph.message import AnyValue", "")
+    code = code.replace(", AnyValue", "") # Remove if part of a list
+    code = code.replace("AnyValue, ", "") # Remove if start of a list
+    # Replace usages of AnyValue type hint with Any
+    code = code.replace(": AnyValue", ": Any")
+    code = code.replace("-> AnyValue", "-> Any")
+    
+    # Fix 4: Auto-fix the "set_entry_point(START)" error if it appears
     if "set_entry_point(START)" in code:
         # This is a risky replace, but usually the first node is defined right before. 
         # Better to rely on the prompt fix below, but we can try to replace START with a placeholder string 
         # that might cause a clearer error, or just leave it.
-        # Let's rely on the prompt fix for now.
         pass
         
     return code
@@ -268,7 +274,8 @@ def node_code_reviewer(state: AgentState):
         6. **Structure**: Imports -> `st.set_page_config` -> Sidebar -> Classes/State -> Nodes -> Graph -> UI.
         7. **No `NameError`**: Define classes/functions before use.
         8. **LangGraph Check**: Verify `workflow.set_entry_point("node_name")` uses a STRING, NOT `START`.
-        9. **Output**: ONLY Python code in markdown blocks.
+        9. **Forbidden Imports**: Do NOT import `AnyValue` from `langgraph.graph.message`. It does not exist.
+        10. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
