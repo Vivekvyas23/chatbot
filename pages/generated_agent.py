@@ -1,211 +1,211 @@
-# REQUIRED INSTALLATIONS:
-# pip install streamlit langgraph langchain-core langchain-google-genai pydantic
+# --- INSTALLATION REQUIRED ---
+# pip install streamlit langgraph langchain-google-genai pydantic
 
 import streamlit as st
 import os
-import json
-from datetime import datetime
-from typing import TypedDict, List, Union, Dict, Any
-
-# LangGraph and LangChain imports
-from langgraph.graph import StateGraph, END
-from langchain_core.messages import HumanMessage
-from langchain_core.pydantic_v1 import BaseModel, Field
+from typing import TypedDict, List
+from pydantic import BaseModel, Field
+from langgraph.graph import StateGraph, END, START
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+# Note: JsonOutputParser is imported but the structured call relies on .with_structured_output
+from langchain_core.output_parsers import JsonOutputParser 
 
-# --- 1. Pydantic Schemas and State Definition ---
+# --- 1. Pydantic Schemas for Structured Output ---
 
-# Schema for structured output of identified skills (Node 2)
-class IdentifiedSkills(BaseModel):
-    """Structured list of critical skills for the specified job role."""
-    technical_skills: List[str] = Field(description="Three critical technical competencies for the role.")
-    soft_skills: List[str] = Field(description="Three critical soft skills/behaviors for the role.")
+class Skill(BaseModel):
+    """Schema for a single skill."""
+    name: str = Field(description="The name of the skill (e.g., 'Python', 'Stakeholder Management').")
+    type: str = Field(description="Type of skill: 'Technical' or 'Soft'.")
 
-# State definition for the LangGraph workflow
+class SkillList(BaseModel):
+    """Schema for the full list of identified skills."""
+    list_of_skills: List[Skill] = Field(
+        description="A list containing exactly 3 Technical skills and 3 Soft skills relevant to the role."
+    )
+
+class QuestionList(BaseModel):
+    """Schema for the generated interview questions."""
+    list_of_questions: List[str] = Field(
+        description="A list of 3 unique, challenging, scenario-based interview questions."
+    )
+
+# --- 2. State Management (LangGraph) ---
+
 class InterviewCoachState(TypedDict):
-    """The state object carrying context and results through the graph."""
+    """
+    Represents the state of the interview coaching workflow.
+    """
     job_role: str
     experience_level: str
-    timestamp: datetime
-    identified_skills: Union[IdentifiedSkills, None]
-    generated_questions: List[str]
+    list_of_skills: List[Skill]
+    list_of_questions: List[str]
     final_guide_text: str
 
-# --- 2. Node Functions ---
+# --- 3. LLM Initialization Helper ---
 
-def input_validation_node(state: InterviewCoachState) -> InterviewCoachState:
-    """Node 1: Validates inputs and initializes the state."""
-    job_role = state.get("job_role")
-    level = state.get("experience_level")
+@st.cache_resource
+def get_llm(api_key: str):
+    """Initializes and caches the ChatGoogleGenerativeAI instance."""
+    if not api_key:
+        # The key check happens in main(), but this prevents caching an error state
+        return None
+    try:
+        # Use a powerful model for complex reasoning and structured output
+        return ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash",
+            google_api_key=api_key,
+            temperature=0.3
+        )
+    except Exception as e:
+        st.error(f"Error initializing LLM: {e}")
+        return None
 
-    if not job_role or len(job_role.strip()) < 3:
-        raise ValueError("Job role is required and must be descriptive.")
-    if not level:
-        raise ValueError("Experience level must be selected.")
+# --- 4. Node Functions (Processing Steps) ---
 
-    st.toast(f"Starting preparation for {level} {job_role}...")
-    
-    return {
-        "job_role": job_role.strip(),
-        "experience_level": level,
-        "timestamp": datetime.now(),
-        # Initialize intermediate fields
-        "identified_skills": None,
-        "generated_questions": [],
-        "final_guide_text": ""
-    }
-
-def skill_identifier_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
-    """Node 2: Uses LLM to identify critical competencies based on role and level."""
+# Node 1: skill_analyzer
+def skill_analyzer(state: InterviewCoachState, config: dict) -> dict:
+    st.status("Node 1: Analyzing job requirements and identifying core skills...", state="running")
+    llm = config["configurable"]["llm"]
     role = state["job_role"]
     level = state["experience_level"]
     
-    st.info("Step 1/4: Identifying core competencies for the role...")
-
-    prompt = f"""
-    Analyze the role: '{role}' at the '{level}' level.
-    Identify the 3 most critical technical competencies and the 3 most critical soft skills required for success in this specific position.
-    Structure the output strictly according to the provided JSON schema.
-    """
-    
-    # Use structured output feature for reliable JSON parsing
-    structured_llm = llm.with_structured_output(IdentifiedSkills)
-    
-    response = structured_llm.invoke([HumanMessage(content=prompt)])
-    
-    return {"identified_skills": response}
-
-def question_generator_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
-    """Node 3: Generates 3 challenging interview questions mapped to the identified skills."""
-    skills: IdentifiedSkills = state["identified_skills"]
-    role = state["job_role"]
-    
-    st.info("Step 2/4: Generating challenging, tailored interview questions...")
-
-    skill_list = skills.technical_skills + skills.soft_skills
-    
-    prompt = f"""
-    You are an expert interviewer. The candidate is interviewing for a '{role}' role.
-    The most critical skills are: {', '.join(skill_list)}.
-    
-    Generate exactly three (3) highly relevant, challenging interview questions. 
-    Ensure each question is designed to probe at least one of the critical skills listed above.
-    
-    Output format: A simple JSON list of strings, e.g., ["Question 1?", "Question 2?", "Question 3?"]. Do not include any other text or markdown formatting outside the list.
-    """
-    
-    # Use JSON mode for reliable list output
-    llm_json = llm.with_config({"structured_output": {"type": "json"}})
-    response = llm_json.invoke([HumanMessage(content=prompt)])
-    
-    try:
-        # The response content should be a JSON string representing the list
-        questions = json.loads(response.content)
-        if not isinstance(questions, list) or len(questions) != 3:
-             # If LLM returns malformed JSON, try splitting by newline as a fallback
-             questions = [q.strip() for q in response.content.split('\n') if q.strip()]
-             questions = questions[:3]
-             if len(questions) < 3:
-                 raise ValueError("Could not reliably parse 3 questions.")
-    except Exception:
-        # Final fallback
-        st.warning("Could not parse structured questions. Using generic placeholders.")
-        questions = [f"Tell me about a time you handled complexity in {role}", "Describe a project failure.", "How do you prioritize competing demands?"]
-        
-    return {"generated_questions": questions}
-
-def star_guide_generator_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
-    """Node 4: Generates the final, detailed STAR method coaching guide."""
-    questions = state["generated_questions"]
-    skills: IdentifiedSkills = state["identified_skills"]
-    role = state["job_role"]
-    
-    st.info("Step 3/4: Compiling comprehensive STAR method preparation guide...")
-    
-    guide_parts = []
-    
-    guide_parts.append(f"# 🚀 Interview Prep Guide: {state['experience_level']} {role}")
-    guide_parts.append(f"*(Generated on: {state['timestamp'].strftime('%Y-%m-%d %H:%M')})*")
-    guide_parts.append("---")
-    
-    # Summarize skills
-    guide_parts.append("## 🎯 Critical Competencies Targeted")
-    guide_parts.append("Based on your role and level, the following skills are essential for your preparation:")
-    guide_parts.append(f"**Technical:** {', '.join(skills.technical_skills)}")
-    guide_parts.append(f"**Behavioral/Soft:** {', '.join(skills.soft_skills)}")
-    guide_parts.append("---")
-
-    
-    prompt = f"""
-    You are an expert interview coach. For each question provided below, generate a detailed, comprehensive guide on how the candidate should structure their answer using the STAR (Situation, Task, Action, Result) methodology.
-
-    The guidance must be highly specific, advising them what kind of content they should include in the S, T, A, and R sections, ensuring the answer effectively demonstrates the underlying skills required for a '{role}' role.
-
-    Critical Skills: {', '.join(skills.technical_skills + skills.soft_skills)}
-
-    Questions to Address:
-    {json.dumps(questions, indent=2)}
-
-    Format the output using Markdown. Structure the response with clear H3 headings for each question, followed by four detailed bulleted lists (S, T, A, R) providing specific coaching points for that question. Do NOT include any introductory or concluding text outside of the guidance for the questions themselves.
-    """
-    
-    response = llm.invoke([HumanMessage(content=prompt)])
-    
-    guide_parts.append("## 📝 Detailed STAR Method Coaching")
-    guide_parts.append(response.content)
-
-    final_guide = "\n\n".join(guide_parts)
-    
-    return {"final_guide_text": final_guide}
-
-# --- 3. Graph Initialization ---
-
-def initialize_graph(api_key: str):
-    """Initializes the LLM and compiles the sequential LangGraph."""
-    
-    # Initialize LLM using the provided API key
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
-        api_key=api_key,
-        temperature=0.3,
-        convert_to_google_format=True
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are an expert AI systems analyst. Identify the crucial skills for the given role. "
+                "You MUST return exactly 3 Technical Skills and 3 Soft Skills. Format the output strictly as JSON following the provided schema.",
+            ),
+            (
+                "human",
+                f"Analyze the requirements for a {level} {role}. What are the 6 most critical skills?"
+            ),
+        ]
     )
 
-    # Wrap LLM-dependent node functions to pass the LLM instance
-    # Note: LangGraph requires node functions to only accept the state, 
-    # but we can wrap them to inject the LLM dependency.
-    def skill_id_wrapper(state):
-        return skill_identifier_node(state, llm)
+    # Use .with_structured_output for robust, type-safe JSON generation with Gemini
+    chain = prompt | llm.with_structured_output(SkillList)
     
-    def question_gen_wrapper(state):
-        return question_generator_node(state, llm)
+    try:
+        result = chain.invoke({})
+        st.status("Node 1: Skill analysis complete.", state="complete")
+        return {"list_of_skills": result.list_of_skills}
+    except Exception as e:
+        st.error(f"Error in skill_analyzer: {e}")
+        st.status("Node 1: Failed.", state="error")
+        # Return an empty list to prevent downstream nodes from crashing
+        return {"list_of_skills": []}
 
-    def guide_gen_wrapper(state):
-        return star_guide_generator_node(state, llm)
+# Node 2: question_generator
+def question_generator(state: InterviewCoachState, config: dict) -> dict:
+    st.status("Node 2: Generating challenging interview questions...", state="running")
+    llm = config["configurable"]["llm"]
+    skills = state["list_of_skills"]
+    
+    if not skills:
+        st.status("Node 2: Skipped due to missing skills.", state="error")
+        return {"list_of_questions": ["Error: Skills list was empty."]}
 
-    # Build Graph
-    builder = StateGraph(InterviewCoachState)
+    skill_names = [s.name for s in skills]
 
-    builder.add_node("validate", input_validation_node)
-    builder.add_node("identify_skills", skill_id_wrapper)
-    builder.add_node("generate_questions", question_gen_wrapper)
-    builder.add_node("generate_guide", guide_gen_wrapper)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                "You are a senior interviewer. Based on the provided skills, generate 3 unique, challenging, scenario-based interview questions. "
+                "Format the output strictly as JSON following the provided schema.",
+            ),
+            (
+                "human",
+                f"Generate 3 challenging questions based on these core skills: {', '.join(skill_names)}."
+            ),
+        ]
+    )
 
-    # Define edges (Sequential Flow)
-    builder.set_entry_point("validate")
-    builder.add_edge("validate", "identify_skills")
-    builder.add_edge("identify_skills", "generate_questions")
-    builder.add_edge("generate_questions", "generate_guide")
-    builder.add_edge("generate_guide", END)
+    chain = prompt | llm.with_structured_output(QuestionList)
+    
+    try:
+        result = chain.invoke({})
+        st.status("Node 2: Question generation complete.", state="complete")
+        return {"list_of_questions": result.list_of_questions}
+    except Exception as e:
+        st.error(f"Error in question_generator: {e}")
+        st.status("Node 2: Failed.", state="error")
+        return {"list_of_questions": ["Error: Question generation failed."]}
 
-    return builder.compile()
+# Node 3: answer_guide
+def answer_guide(state: InterviewCoachState, config: dict) -> dict:
+    st.status("Node 3: Compiling final guidance and STAR method tips...", state="running")
+    llm = config["configurable"]["llm"]
+    questions = state["list_of_questions"]
+    skills = state["list_of_skills"]
+    role = state["job_role"]
 
-# --- 4. Streamlit UI and Execution ---
+    if not questions or "Error" in questions[0]:
+        guide_text = "## Generation Failed\nCannot generate guide due to errors in previous steps."
+        return {"final_guide_text": guide_text}
+
+    skill_details = "\n".join([f"* **{s.name}** ({s.type})" for s in skills])
+    question_list = "\n".join([f"1. {q}" for q in questions])
+
+    prompt_text = f"""
+    Generate a comprehensive interview preparation guide in Markdown format for the role of a {role}.
+
+    ### 1. Core Skills Targeted
+    The interviewer will focus on these areas:
+    {skill_details}
+
+    ### 2. Practice Interview Questions
+    Prepare structured answers for the following challenging questions:
+    {question_list}
+
+    ### 3. Essential Guidance: The STAR Method
+    Provide a detailed, easy-to-read explanation of the STAR method and why it is critical for behavioral and scenario-based questions. Use clear formatting to emphasize the components (Situation, Task, Action, Result).
+    """
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", "You are an expert content generator, specializing in professional interview guides. Ensure the output is formatted beautifully in Markdown."),
+        ("human", prompt_text)
+    ])
+
+    chain = prompt | llm
+    
+    try:
+        result = chain.invoke({})
+        st.status("Node 3: Final guide compiled.", state="complete")
+        return {"final_guide_text": result.content}
+    except Exception as e:
+        st.error(f"Error in answer_guide: {e}")
+        st.status("Node 3: Failed.", state="error")
+        return {"final_guide_text": "## Generation Failed\nAn error occurred while compiling the final guide."}
+
+# --- 5. LangGraph Definition and Compilation ---
+
+def build_graph(llm):
+    """Defines and compiles the linear LangGraph workflow."""
+    workflow = StateGraph(InterviewCoachState)
+
+    # Add Nodes, passing the LLM via config
+    workflow.add_node("skill_analyzer", lambda state: skill_analyzer(state, {"configurable": {"llm": llm}}))
+    workflow.add_node("question_generator", lambda state: question_generator(state, {"configurable": {"llm": llm}}))
+    workflow.add_node("answer_guide", lambda state: answer_guide(state, {"configurable": {"llm": llm}}))
+
+    # Define Edges (Linear Flow)
+    workflow.set_entry_point(START)
+    workflow.add_edge(START, "skill_analyzer")
+    workflow.add_edge("skill_analyzer", "question_generator")
+    workflow.add_edge("question_generator", "answer_guide")
+    workflow.add_edge("answer_guide", END)
+
+    return workflow.compile()
+
+# --- 6. Streamlit UI and Execution ---
 
 def main():
-    st.set_page_config(page_title="LangGraph Interview Coach", layout="wide")
-    st.title("👨‍💼 AI Job Interview Coach (LangGraph + Gemini)")
-    st.markdown("Prepare for your next interview using a structured, multi-step AI agent.")
+    st.set_page_config(page_title="Job Interview Coach Agent", layout="wide")
+    st.title("🧠 Job Interview Coach Agent")
+    st.caption("Powered by LangGraph and Google Gemini")
 
     # --- Sidebar for API Key ---
     with st.sidebar:
@@ -213,74 +213,85 @@ def main():
         google_api_key = st.text_input(
             "Google Gemini API Key", 
             type="password",
-            help="Required for running the LLM nodes (Gemini 2.5 Flash)."
+            help="Get your key from Google AI Studio.",
+            key="gemini_key"
         )
-        st.markdown("[Get your Gemini API Key here](https://aistudio.google.com/app/apikey)")
+        if google_api_key:
+            # Setting environment variable for good measure, though the LLM initialization uses the passed key
+            os.environ["GEMINI_API_KEY"] = google_api_key
+        
+        st.markdown("---")
+        st.markdown("### Agent Workflow")
+        st.code("""
+START -> skill_analyzer
+      -> question_generator
+      -> answer_guide -> END
+        """)
 
     # --- Main Input Form ---
-    if not google_api_key:
-        st.warning("Please enter your Google Gemini API Key in the sidebar to proceed.")
-        st.stop()
-        
+    st.subheader("Define Your Target Role")
+    
     col1, col2 = st.columns(2)
     
     with col1:
         job_role = st.text_input(
             "Target Job Role", 
-            placeholder="e.g., Senior Data Scientist, Frontend Developer",
-            key="job_role_input"
+            value="Senior Python Developer", 
+            placeholder="e.g., Data Scientist, Product Manager"
         )
     
     with col2:
         experience_level = st.selectbox(
-            "Experience Level",
-            options=["", "Junior", "Mid-Level", "Senior", "Executive/Principal"],
-            index=0,
-            key="level_select"
+            "Experience Level", 
+            options=["Junior", "Mid-Level", "Senior", "Principal"],
+            index=2
         )
 
-    run_button = st.button("🚀 Generate Interview Guide", type="primary", use_container_width=True)
-    
-    st.markdown("---")
+    run_button = st.button("Generate Interview Guide", type="primary")
 
-    # --- Execution Logic ---
     if run_button:
-        if not job_role or not experience_level:
-            st.error("Please fill out both the Job Role and Experience Level.")
+        if not google_api_key:
+            st.error("Please enter your Google Gemini API Key in the sidebar to proceed.")
             return
 
-        try:
-            # Initialize and compile the graph
-            interview_coach_app = initialize_graph(google_api_key)
-            
-            # Initial state input
-            initial_state = {
-                "job_role": job_role,
-                "experience_level": experience_level
-            }
+        # Initialize LLM and Graph
+        llm = get_llm(google_api_key)
+        if not llm:
+            # Error message handled inside get_llm if initialization fails for other reasons
+            return
 
-            # Run the graph with a spinner for feedback
-            with st.spinner("Processing interview guide... (This may take 10-20 seconds as the agent runs all four steps sequentially)"):
-                # The invoke call executes the entire graph
-                final_state = interview_coach_app.invoke(initial_state)
+        graph = build_graph(llm)
+        
+        # Initial State
+        initial_state = InterviewCoachState(
+            job_role=job_role,
+            experience_level=experience_level,
+            list_of_skills=[],
+            list_of_questions=[],
+            final_guide_text=""
+        )
 
-            st.success("✅ Guide Generation Complete!")
-            
-            # Store final result in session state for display
-            st.session_state['final_guide_text'] = final_state['final_guide_text']
-            st.session_state['last_role'] = job_role
-
-        except ValueError as e:
-            st.error(f"Input Error: {e}")
-        except Exception as e:
-            st.error(f"An error occurred during graph execution: {e}")
-            st.info("Check your API key and ensure the inputs are valid.")
-
-
-    # --- Results Display ---
-    if 'final_guide_text' in st.session_state:
-        st.header(f"Results for {st.session_state.get('last_role', 'Job Role')}")
-        st.markdown(st.session_state['final_guide_text'])
+        st.divider()
+        st.subheader("Workflow Execution")
+        
+        # Execution Block (Loading Indicator)
+        with st.container():
+            with st.spinner("Running complex multi-step analysis..."):
+                try:
+                    # Invoke the graph
+                    # Note: LangGraph's invoke handles the state transitions sequentially
+                    final_state = graph.invoke(initial_state)
+                    
+                    st.success("Analysis Complete! Guide Generated.")
+                    st.balloons()
+                    
+                    # Display Final Output
+                    st.markdown("---")
+                    st.subheader(f"Interview Preparation Guide for {experience_level} {job_role}")
+                    st.markdown(final_state["final_guide_text"])
+                    
+                except Exception as e:
+                    st.error(f"An error occurred during graph execution: {e}")
 
 if __name__ == "__main__":
     main()

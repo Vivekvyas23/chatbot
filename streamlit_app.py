@@ -116,6 +116,16 @@ def sanitize_code(code: str) -> str:
     if "ChatOpenAI" in code:
         code = code.replace("from langchain_openai", "from langchain_google_genai")
         code = code.replace("ChatOpenAI", "ChatGoogleGenerativeAI")
+    
+    # Fix 3: Auto-fix the "set_entry_point(START)" error if it appears
+    # Matches workflow.set_entry_point(START) and attempts to warn or fix (though tough with regex)
+    # Ideally, we fix this via prompt, but this is a fallback if literal string is found.
+    if "set_entry_point(START)" in code:
+        # This is a risky replace, but usually the first node is defined right before. 
+        # Better to rely on the prompt fix below, but we can try to replace START with a placeholder string 
+        # that might cause a clearer error, or just leave it.
+        # Let's rely on the prompt fix for now.
+        pass
         
     return code
 
@@ -200,6 +210,11 @@ def node_architect(state: AgentState):
         7. **Execution**: When the user clicks the "Run" button, compile the graph and stream/invoke it. Display results using `st.write` or `st.markdown`.
         8. **Compatibility**: Use standard `pydantic` v2.
         
+        **CRITICAL LANGGRAPH SYNTAX:**
+        - `workflow.set_entry_point("node_name")` <-- MUST use the STRING name of your first node.
+        - **NEVER** use `workflow.set_entry_point(START)`. This causes a ValueError.
+        - Example: If your first node is `def start_node(state):`, use `workflow.set_entry_point("start_node")`.
+        
         The output must be a ready-to-run file.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -252,7 +267,8 @@ def node_code_reviewer(state: AgentState):
         5. **Imports**: Ensure correct imports (`streamlit`, `langgraph`, `pydantic`, `langchain_google_genai`).
         6. **Structure**: Imports -> `st.set_page_config` -> Sidebar -> Classes/State -> Nodes -> Graph -> UI.
         7. **No `NameError`**: Define classes/functions before use.
-        8. **Output**: ONLY Python code in markdown blocks.
+        8. **LangGraph Check**: Verify `workflow.set_entry_point("node_name")` uses a STRING, NOT `START`.
+        9. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
