@@ -103,6 +103,22 @@ def extract_code(text: str) -> str:
     except Exception:
         return text
 
+def sanitize_code(code: str) -> str:
+    """
+    Applies brute-force string replacements to fix common LLM generation errors
+    that prompts sometimes fail to catch (like deprecated imports).
+    """
+    # Fix 1: Force Pydantic V2 over deprecated LangChain wrappers
+    code = code.replace("from langchain_core.pydantic_v1", "from pydantic")
+    code = code.replace("from langchain.pydantic_v1", "from pydantic")
+    
+    # Fix 2: Safety net for OpenAI -> Gemini if the LLM ignores instructions
+    if "ChatOpenAI" in code:
+        code = code.replace("from langchain_openai", "from langchain_google_genai")
+        code = code.replace("ChatOpenAI", "ChatGoogleGenerativeAI")
+        
+    return code
+
 # Mapping of common import names to their actual PyPI package names
 PACKAGE_MAPPING = {
     "bs4": "beautifulsoup4",
@@ -244,6 +260,9 @@ def node_code_reviewer(state: AgentState):
         clean_code = extract_code(content)
         if not clean_code:
             clean_code = content.replace("```python", "").replace("```", "").strip()
+            
+        # --- Sanitization: Fix common AI errors ---
+        clean_code = sanitize_code(clean_code)
 
         return {"final_code": clean_code, "steps_log": ["Final App Generated"]}
     except Exception as e:

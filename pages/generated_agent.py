@@ -1,243 +1,286 @@
+# REQUIRED INSTALLATIONS:
+# pip install streamlit langgraph langchain-core langchain-google-genai pydantic
+
 import streamlit as st
 import os
-from typing import TypedDict, List, Dict, Any
-from functools import partial
+import json
+from datetime import datetime
+from typing import TypedDict, List, Union, Dict, Any
 
-# --- Dependencies ---
-# pip install streamlit langgraph langchain_core langchain-google-genai
-# --------------------
-
-# LangGraph and LangChain components
+# LangGraph and LangChain imports
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.pydantic_v1 import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-# --- 1. State Management ---
+# --- 1. Pydantic Schemas and State Definition ---
 
-class AgentState(TypedDict):
+# Schema for structured output of identified skills (Node 2)
+class IdentifiedSkills(BaseModel):
+    """Structured list of critical skills for the specified job role."""
+    technical_skills: List[str] = Field(description="Three critical technical competencies for the role.")
+    soft_skills: List[str] = Field(description="Three critical soft skills/behaviors for the role.")
+
+# State definition for the LangGraph workflow
+class InterviewCoachState(TypedDict):
+    """The state object carrying context and results through the graph."""
+    job_role: str
+    experience_level: str
+    timestamp: datetime
+    identified_skills: Union[IdentifiedSkills, None]
+    generated_questions: List[str]
+    final_guide_text: str
+
+# --- 2. Node Functions ---
+
+def input_validation_node(state: InterviewCoachState) -> InterviewCoachState:
+    """Node 1: Validates inputs and initializes the state."""
+    job_role = state.get("job_role")
+    level = state.get("experience_level")
+
+    if not job_role or len(job_role.strip()) < 3:
+        raise ValueError("Job role is required and must be descriptive.")
+    if not level:
+        raise ValueError("Experience level must be selected.")
+
+    st.toast(f"Starting preparation for {level} {job_role}...")
+    
+    return {
+        "job_role": job_role.strip(),
+        "experience_level": level,
+        "timestamp": datetime.now(),
+        # Initialize intermediate fields
+        "identified_skills": None,
+        "generated_questions": [],
+        "final_guide_text": ""
+    }
+
+def skill_identifier_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
+    """Node 2: Uses LLM to identify critical competencies based on role and level."""
+    role = state["job_role"]
+    level = state["experience_level"]
+    
+    st.info("Step 1/4: Identifying core competencies for the role...")
+
+    prompt = f"""
+    Analyze the role: '{role}' at the '{level}' level.
+    Identify the 3 most critical technical competencies and the 3 most critical soft skills required for success in this specific position.
+    Structure the output strictly according to the provided JSON schema.
     """
-    Represents the state of our graph, persisting variables across nodes.
+    
+    # Use structured output feature for reliable JSON parsing
+    structured_llm = llm.with_structured_output(IdentifiedSkills)
+    
+    response = structured_llm.invoke([HumanMessage(content=prompt)])
+    
+    return {"identified_skills": response}
+
+def question_generator_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
+    """Node 3: Generates 3 challenging interview questions mapped to the identified skills."""
+    skills: IdentifiedSkills = state["identified_skills"]
+    role = state["job_role"]
+    
+    st.info("Step 2/4: Generating challenging, tailored interview questions...")
+
+    skill_list = skills.technical_skills + skills.soft_skills
+    
+    prompt = f"""
+    You are an expert interviewer. The candidate is interviewing for a '{role}' role.
+    The most critical skills are: {', '.join(skill_list)}.
+    
+    Generate exactly three (3) highly relevant, challenging interview questions. 
+    Ensure each question is designed to probe at least one of the critical skills listed above.
+    
+    Output format: A simple JSON list of strings, e.g., ["Question 1?", "Question 2?", "Question 3?"]. Do not include any other text or markdown formatting outside the list.
     """
-    destination: str
-    list_of_spots: List[str]
-    itinerary_text: str
-    budget_string: str
-
-# --- 2. LLM Initialization ---
-
-@st.cache_resource
-def initialize_llm(api_key: str):
-    """Initializes the Gemini LLM."""
-    if not api_key:
-        return None
+    
+    # Use JSON mode for reliable list output
+    llm_json = llm.with_config({"structured_output": {"type": "json"}})
+    response = llm_json.invoke([HumanMessage(content=prompt)])
+    
     try:
-        # Using gemini-2.5-flash for a balance of speed and planning capability
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            google_api_key=api_key, 
-            temperature=0.3
-        )
-        return llm
-    except Exception as e:
-        st.error(f"Error initializing LLM. Check your API key or permissions: {e}")
-        return None
-
-# --- 3. Graph Nodes (LLM Functions) ---
-
-def scout_locations(state: AgentState, llm: ChatGoogleGenerativeAI) -> Dict[str, Any]:
-    """Identifies three highly-rated tourist spots."""
-    st.info(f"🔎 Node 1: Scouting locations in {state['destination']}...")
-    destination = state['destination']
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an expert travel researcher. Identify exactly three diverse and highly-rated tourist spots suitable for a single day trip in the specified destination. Respond ONLY with a comma-separated list of the three location names, nothing else. Example: Tower of London, British Museum, Hyde Park."),
-        ("human", f"Destination: {destination}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({})
-    
-    # Process the response string into a list
-    spots_str = response.content.strip()
-    list_of_spots = [spot.strip() for spot in spots_str.split(',') if spot.strip()][:3]
-    
-    if len(list_of_spots) < 3:
-        st.warning(f"Could only find {len(list_of_spots)} spots. Proceeding anyway.")
+        # The response content should be a JSON string representing the list
+        questions = json.loads(response.content)
+        if not isinstance(questions, list) or len(questions) != 3:
+             # If LLM returns malformed JSON, try splitting by newline as a fallback
+             questions = [q.strip() for q in response.content.split('\n') if q.strip()]
+             questions = questions[:3]
+             if len(questions) < 3:
+                 raise ValueError("Could not reliably parse 3 questions.")
+    except Exception:
+        # Final fallback
+        st.warning("Could not parse structured questions. Using generic placeholders.")
+        questions = [f"Tell me about a time you handled complexity in {role}", "Describe a project failure.", "How do you prioritize competing demands?"]
         
-    return {"list_of_spots": list_of_spots}
+    return {"generated_questions": questions}
 
-
-def plan_itinerary(state: AgentState, llm: ChatGoogleGenerativeAI) -> Dict[str, Any]:
-    """Creates a cohesive 1-day schedule."""
-    st.info("🗓️ Node 2: Planning the itinerary (9 AM to 6 PM)...")
-    destination = state['destination']
-    spots = state['list_of_spots']
+def star_guide_generator_node(state: InterviewCoachState, llm: ChatGoogleGenerativeAI) -> InterviewCoachState:
+    """Node 4: Generates the final, detailed STAR method coaching guide."""
+    questions = state["generated_questions"]
+    skills: IdentifiedSkills = state["identified_skills"]
+    role = state["job_role"]
     
-    if not spots:
-        # This should ideally be caught by the streaming loop, but good for node safety
-        st.error("Cannot plan itinerary: No spots were identified in the previous step.")
-        return {"itinerary_text": "Planning failed: No spots identified."}
-
-    spots_list = "\n- " + "\n- ".join(spots)
+    st.info("Step 3/4: Compiling comprehensive STAR method preparation guide...")
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are an expert itinerary planner. Create a detailed, cohesive 1-day schedule (9 AM to 6 PM) for the provided destination and spots. Logically sequence the spots, include suggested transition times, and brief activity descriptions. Format the output as clean, structured markdown text with clear time blocks."),
-        ("human", f"Destination: {destination}\nSpots to include:{spots_list}")
-    ])
+    guide_parts = []
     
-    chain = prompt | llm
-    response = chain.invoke({})
+    guide_parts.append(f"# 🚀 Interview Prep Guide: {state['experience_level']} {role}")
+    guide_parts.append(f"*(Generated on: {state['timestamp'].strftime('%Y-%m-%d %H:%M')})*")
+    guide_parts.append("---")
     
-    return {"itinerary_text": response.content}
+    # Summarize skills
+    guide_parts.append("## 🎯 Critical Competencies Targeted")
+    guide_parts.append("Based on your role and level, the following skills are essential for your preparation:")
+    guide_parts.append(f"**Technical:** {', '.join(skills.technical_skills)}")
+    guide_parts.append(f"**Behavioral/Soft:** {', '.join(skills.soft_skills)}")
+    guide_parts.append("---")
 
-
-def budget_estimator(state: AgentState, llm: ChatGoogleGenerativeAI) -> Dict[str, Any]:
-    """Provides a rough, high-level cost estimate."""
-    st.info("💰 Node 3: Estimating preliminary budget...")
-    destination = state['destination']
-    itinerary = state['itinerary_text']
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a financial analyst specializing in travel costs. Based on the destination and itinerary provided, give a rough, high-level cost estimate for a single traveler (entry fees, transportation, 2 meals). Provide the result as a numerical range in USD (e.g., $150 - $250 USD). Respond ONLY with the estimate string, including the currency."),
-        ("human", f"Destination: {destination}\nItinerary:\n{itinerary}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({})
-    
-    return {"budget_string": response.content.strip()}
+    prompt = f"""
+    You are an expert interview coach. For each question provided below, generate a detailed, comprehensive guide on how the candidate should structure their answer using the STAR (Situation, Task, Action, Result) methodology.
 
+    The guidance must be highly specific, advising them what kind of content they should include in the S, T, A, and R sections, ensuring the answer effectively demonstrates the underlying skills required for a '{role}' role.
 
-def final_output(state: AgentState) -> Dict[str, Any]:
-    """Compiles all data into the final state."""
-    st.success("✅ Node 4: Planning complete! Compiling final report.")
-    return state
+    Critical Skills: {', '.join(skills.technical_skills + skills.soft_skills)}
 
-# --- 4. Graph Definition ---
+    Questions to Address:
+    {json.dumps(questions, indent=2)}
 
-def create_travel_graph(llm: ChatGoogleGenerativeAI):
+    Format the output using Markdown. Structure the response with clear H3 headings for each question, followed by four detailed bulleted lists (S, T, A, R) providing specific coaching points for that question. Do NOT include any introductory or concluding text outside of the guidance for the questions themselves.
     """
-    Defines and compiles the LangGraph StateGraph with a deterministic, linear flow.
-    """
-    workflow = StateGraph(AgentState)
+    
+    response = llm.invoke([HumanMessage(content=prompt)])
+    
+    guide_parts.append("## 📝 Detailed STAR Method Coaching")
+    guide_parts.append(response.content)
 
-    # Define Nodes (using partial to inject the LLM dependency)
-    workflow.add_node("scout_locations", partial(scout_locations, llm=llm))
-    workflow.add_node("plan_itinerary", partial(plan_itinerary, llm=llm))
-    workflow.add_node("budget_estimator", partial(budget_estimator, llm=llm))
-    workflow.add_node("final_output", final_output) 
+    final_guide = "\n\n".join(guide_parts)
+    
+    return {"final_guide_text": final_guide}
 
-    # Set Entry Point
-    workflow.set_entry_point("scout_locations") # Start directly at the first processing node
+# --- 3. Graph Initialization ---
 
-    # Define Edges (linear flow)
-    workflow.add_edge("scout_locations", "plan_itinerary")
-    workflow.add_edge("plan_itinerary", "budget_estimator")
-    workflow.add_edge("budget_estimator", "final_output")
+def initialize_graph(api_key: str):
+    """Initializes the LLM and compiles the sequential LangGraph."""
+    
+    # Initialize LLM using the provided API key
+    llm = ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        api_key=api_key,
+        temperature=0.3,
+        convert_to_google_format=True
+    )
 
-    # Define End Point
-    workflow.add_edge("final_output", END)
+    # Wrap LLM-dependent node functions to pass the LLM instance
+    # Note: LangGraph requires node functions to only accept the state, 
+    # but we can wrap them to inject the LLM dependency.
+    def skill_id_wrapper(state):
+        return skill_identifier_node(state, llm)
+    
+    def question_gen_wrapper(state):
+        return question_generator_node(state, llm)
 
-    return workflow.compile()
+    def guide_gen_wrapper(state):
+        return star_guide_generator_node(state, llm)
 
-# --- 5. Streamlit Application ---
+    # Build Graph
+    builder = StateGraph(InterviewCoachState)
+
+    builder.add_node("validate", input_validation_node)
+    builder.add_node("identify_skills", skill_id_wrapper)
+    builder.add_node("generate_questions", question_gen_wrapper)
+    builder.add_node("generate_guide", guide_gen_wrapper)
+
+    # Define edges (Sequential Flow)
+    builder.set_entry_point("validate")
+    builder.add_edge("validate", "identify_skills")
+    builder.add_edge("identify_skills", "generate_questions")
+    builder.add_edge("generate_questions", "generate_guide")
+    builder.add_edge("generate_guide", END)
+
+    return builder.compile()
+
+# --- 4. Streamlit UI and Execution ---
 
 def main():
-    st.set_page_config(page_title="Smart Travel Agent (Gemini/LangGraph)", layout="wide")
-    st.title("🗺️ Smart Travel Agent: 1-Day Planner")
-    st.caption("A sequential planning agent powered by LangGraph and Google Gemini.")
+    st.set_page_config(page_title="LangGraph Interview Coach", layout="wide")
+    st.title("👨‍💼 AI Job Interview Coach (LangGraph + Gemini)")
+    st.markdown("Prepare for your next interview using a structured, multi-step AI agent.")
 
-    # --- Sidebar Configuration ---
-    st.sidebar.header("Configuration")
-    google_api_key = st.sidebar.text_input(
-        "Google Gemini API Key", 
-        type="password", 
-        help="Required for accessing the Gemini model."
-    )
+    # --- Sidebar for API Key ---
+    with st.sidebar:
+        st.header("Configuration")
+        google_api_key = st.text_input(
+            "Google Gemini API Key", 
+            type="password",
+            help="Required for running the LLM nodes (Gemini 2.5 Flash)."
+        )
+        st.markdown("[Get your Gemini API Key here](https://aistudio.google.com/app/apikey)")
+
+    # --- Main Input Form ---
+    if not google_api_key:
+        st.warning("Please enter your Google Gemini API Key in the sidebar to proceed.")
+        st.stop()
+        
+    col1, col2 = st.columns(2)
     
-    llm = None
-    if google_api_key:
-        llm = initialize_llm(google_api_key)
-    else:
-        st.sidebar.warning("Please enter your Gemini API Key to proceed.")
+    with col1:
+        job_role = st.text_input(
+            "Target Job Role", 
+            placeholder="e.g., Senior Data Scientist, Frontend Developer",
+            key="job_role_input"
+        )
+    
+    with col2:
+        experience_level = st.selectbox(
+            "Experience Level",
+            options=["", "Junior", "Mid-Level", "Senior", "Executive/Principal"],
+            index=0,
+            key="level_select"
+        )
 
-    # --- Main UI Inputs ---
-    st.header("1. Input")
-    destination = st.text_input(
-        "Destination (City, Country)",
-        placeholder="e.g., Rome, Italy",
-        key="destination_input"
-    )
-
-    is_ready = llm and destination
-    run_button = st.button(
-        "✈️ Plan My Trip", 
-        type="primary", 
-        disabled=(not is_ready)
-    )
+    run_button = st.button("🚀 Generate Interview Guide", type="primary", use_container_width=True)
+    
+    st.markdown("---")
 
     # --- Execution Logic ---
     if run_button:
-        st.divider()
-        
-        # Initialize the graph
-        try:
-            travel_planner = create_travel_graph(llm)
-        except Exception as e:
-            st.error(f"Failed to compile the graph: {e}")
+        if not job_role or not experience_level:
+            st.error("Please fill out both the Job Role and Experience Level.")
             return
 
-        # Initial State
-        initial_state = {
-            "destination": destination,
-            "list_of_spots": [],
-            "itinerary_text": "",
-            "budget_string": ""
-        }
-        
-        final_state = initial_state # State dictionary to be updated by the stream
-
-        # Run the graph using stream for live updates
-        st.subheader("2. Execution Status")
-        
         try:
-            # Iterate through the stream to get state changes in real-time
-            for chunk in travel_planner.stream(initial_state):
-                # The chunk contains updates from the node that just executed
-                for key, value in chunk.items():
-                    if key != "__end__":
-                        # Merge the output from the current node into the final state
-                        final_state.update(value)
+            # Initialize and compile the graph
+            interview_coach_app = initialize_graph(google_api_key)
             
-            # --- Output Display ---
-            st.divider()
-            st.header(f"3. Final Trip Report for: {final_state['destination']}")
+            # Initial state input
+            initial_state = {
+                "job_role": job_role,
+                "experience_level": experience_level
+            }
 
-            col1, col2 = st.columns([1, 2])
+            # Run the graph with a spinner for feedback
+            with st.spinner("Processing interview guide... (This may take 10-20 seconds as the agent runs all four steps sequentially)"):
+                # The invoke call executes the entire graph
+                final_state = interview_coach_app.invoke(initial_state)
+
+            st.success("✅ Guide Generation Complete!")
             
-            # Column 1: Spots and Budget
-            with col1:
-                st.markdown("### 💰 Estimated Budget")
-                budget_display = final_state.get('budget_string')
-                if budget_display:
-                    st.info(f"**{budget_display}**")
-                else:
-                    st.warning("Budget estimation failed.")
+            # Store final result in session state for display
+            st.session_state['final_guide_text'] = final_state['final_guide_text']
+            st.session_state['last_role'] = job_role
 
-                st.markdown("### 📍 Key Locations Identified")
-                spots = final_state.get('list_of_spots', [])
-                spots_md = "\n".join([f"* {spot}" for spot in spots])
-                st.markdown(spots_md if spots_md else "*No locations found.*")
-
-            # Column 2: Itinerary
-            with col2:
-                st.markdown("### 🗓️ Detailed 1-Day Itinerary (9 AM - 6 PM)")
-                st.markdown(final_state.get('itinerary_text', "*Itinerary planning failed.*"))
-
+        except ValueError as e:
+            st.error(f"Input Error: {e}")
         except Exception as e:
-            st.error("An error occurred during graph execution. Check the status messages above for details.")
-            st.exception(e)
+            st.error(f"An error occurred during graph execution: {e}")
+            st.info("Check your API key and ensure the inputs are valid.")
+
+
+    # --- Results Display ---
+    if 'final_guide_text' in st.session_state:
+        st.header(f"Results for {st.session_state.get('last_role', 'Job Role')}")
+        st.markdown(st.session_state['final_guide_text'])
 
 if __name__ == "__main__":
     main()
