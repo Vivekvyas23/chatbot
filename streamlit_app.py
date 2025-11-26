@@ -34,7 +34,7 @@ This agent builds other agents! Describe what you want, and the pipeline will:
 2. **Draft Initial Code** 🏗️
 3. **Identify APIs** 🔌
 4. **Finalize & Polish Code** ✨
-5. **Run the Agent** ⚡
+5. **Generate Standalone App** 🚀
 """)
 
 # --- Sidebar: Configuration ---
@@ -103,45 +103,6 @@ def extract_code(text: str) -> str:
     except Exception:
         return text
 
-# Mapping of common import names to their actual PyPI package names
-PACKAGE_MAPPING = {
-    "bs4": "beautifulsoup4",
-    "sklearn": "scikit-learn",
-    "cv2": "opencv-python",
-    "PIL": "Pillow",
-    "dotenv": "python-dotenv",
-    "yaml": "PyYAML",
-    "dateutil": "python-dateutil"
-}
-
-def install_missing_package(import_name: str):
-    """Attempts to install a missing package via pip, handling aliases."""
-    try:
-        # Resolve the actual package name from the import name
-        package_name = PACKAGE_MAPPING.get(import_name, import_name)
-        
-        # Security check: basic sanitization to prevent command injection
-        if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
-            raise ValueError(f"Invalid package name: {package_name}")
-            
-        st.info(f"Attempting to install `{package_name}`...")
-        
-        # Use subprocess.run to capture output for better debugging
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", package_name],
-            capture_output=True,
-            text=True
-        )
-        
-        if result.returncode != 0:
-            st.error(f"Pip Install Failed for `{package_name}`:\n\n{result.stderr}")
-            return False
-            
-        return True
-    except Exception as e:
-        st.error(f"System Error during install of {package_name}: {e}")
-        return False
-
 # --- Node Logic ---
 
 def node_requirements_analyst(state: AgentState):
@@ -160,6 +121,7 @@ def node_requirements_analyst(state: AgentState):
         3. The flow of data (Edges).
         4. What information needs to be stored in the State.
         5. ANY external API keys needed (e.g., SendGrid, Spotify, OpenAI).
+        6. UI Components needed (e.g., "A text input for destination", "A file uploader for PDF").
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -174,42 +136,26 @@ def node_architect(state: AgentState):
     try:
         llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
         prompt = f"""
-        You are a Senior Python Developer specializing in LangGraph and LangChain.
+        You are a Senior Python Developer specializing in Streamlit and LangGraph.
         Based on these requirements:
         {state['requirements']}
         
-        Write the Python code to implement this using `langgraph` and `langchain_google_genai`.
+        Write a COMPLETE, STANDALONE Streamlit application (`app.py`).
         
         CRITICAL ARCHITECTURE RULES:
-        1. The code MUST be wrapped in a function: 
-        `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
+        1. **Do NOT** wrap the logic in a `run_agent` function. Write a top-level script.
+        2. **Imports**: Start with `import streamlit as st`, `import os`, `from typing import...`, `from langgraph...`.
+        3. **Sidebar**: Use `st.sidebar` to collect ALL necessary API keys (Google API Key, etc.).
+        4. **Main UI**: Create `st.text_input`, `st.button`, etc., based on the requirements.
+        5. **Graph Definition**: Define the State, Nodes, and Graph *inside* the script.
+        6. **Execution**: When the user clicks the "Run" button, compile the graph and stream/invoke it. Display results using `st.write` or `st.markdown`.
+        7. **Compatibility**: Use standard `pydantic` v2.
         
-        2. Any external API keys must be retrieved from the `secrets` dictionary.
-        Example: `weather_key = secrets.get("WEATHER_API_KEY")`
-        
-        3. Define a helper function to list required keys:
-        `def get_required_api_keys() -> list[str]:`
-        Example: return ["WEATHER_API_KEY"]
-        
-        4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
-        
-        5. IMPORTS: 
-           - Include `from typing import Dict, List, Any, Optional`.
-           - Include `from pydantic import BaseModel, Field`.
-           - Include standard libs like `import json`, `import datetime`, `import random` if needed.
-
-        6. STRICT CODE STRUCTURE (Follow this order to prevent NameError):
-           a. Imports
-           b. **ALL Pydantic Models/Classes** (Define them HERE, at the top level, before using them in State or Functions).
-           c. State Definition (TypedDict).
-           d. Node Functions.
-           e. The `run_agent` entry point function.
-        
-        - Use `ChatGoogleGenerativeAI` with `google_api_key=llm_api_key`.
+        The output must be a ready-to-run file.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
-        return {"initial_code": content, "steps_log": ["Initial Code Drafted"]}
+        return {"initial_code": content, "steps_log": ["Initial App Drafted"]}
     except Exception as e:
         return {"error": f"Architect Error: {str(e)}", "steps_log": ["Architecture Failed"]}
 
@@ -224,9 +170,9 @@ def node_api_specialist(state: AgentState):
         Review this initial code draft:
         {state['initial_code']}
         
-        1. List what specific external APIs are needed based on the user request: "{state['user_request']}".
-        2. Explicitly list the VARIABLE NAMES for these keys (e.g., 'SENDGRID_API_KEY').
-        3. Suggest how to integrate them into the `secrets` dictionary pattern.
+        1. Ensure `st.sidebar.text_input` exists for EVERY API key needed (Gemini, Serper, etc.).
+        2. If missing, suggest adding them.
+        3. Suggest adding a comment at the top of the file listing `pip install` commands for required packages.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -242,38 +188,27 @@ def node_code_reviewer(state: AgentState):
         llm = get_llm(st.session_state.get("api_key"), st.session_state.get("model"))
         prompt = f"""
         You are a Lead Code Reviewer. 
-        Your goal is to produce the FINAL, RUNNABLE Python file.
+        Your goal is to produce the FINAL, RUNNABLE `app.py` file.
         
         Inputs:
         - Draft Code: {state['initial_code']}
         - API Suggestions: {state['api_needs']}
         
         STRICT REQUIREMENTS:
-        1. The code MUST be self-contained (imports at top).
-        
-        2. DEFINE THIS EXACT FUNCTION SIGNATURE for the main entry point:
-        `def run_agent(user_input: str, llm_api_key: str, secrets: dict = None) -> str:`
-        
-        3. DEFINE THIS HELPER FUNCTION:
-        `def get_required_api_keys() -> list[str]:`
-        - It must return a list of strings of the keys needed (e.g., ["SENDGRID_API_KEY"]).
-        - If no extra keys are needed, return [].
-        
-        4. Inside `run_agent`:
-        - Initialize `ChatGoogleGenerativeAI(google_api_key=llm_api_key, ...)`
-        - Access third-party keys via `secrets.get("KEY_NAME")`.
-        - Define the State, Nodes, and Workflow.
-        - Compile and run the workflow.
-        - Return the final text output.
-        
-        5. Assume `langchain_community` is installed.
-        6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
-        7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top. Ensure `import datetime` or `import json` are present if used.
-        8. CRITICAL FIX for NameError:
-           - You MUST define ALL classes/Pydantic models (e.g. `class TouristSpot(BaseModel):`) **IMMEDIATELY AFTER IMPORTS**.
-           - Do NOT define classes inside functions.
-           - Do NOT define a class AFTER it is used in a TypeHint or State definition.
-        9. OUTPUT ONLY THE PYTHON CODE. Wrap it in markdown code blocks.
+        1. **Standalone File**: The code must run with `streamlit run app.py`.
+        2. **Dependencies**: Include a comment block at the very top listing `pip install` commands.
+        3. **Imports**: Ensure all imports (`streamlit`, `langgraph`, `pydantic`, `langchain_google_genai`) are correct.
+        4. **Structure**: 
+           - Imports
+           - `st.set_page_config(...)`
+           - Sidebar for API Keys
+           - Pydantic Models & State Definition
+           - Node Functions
+           - Graph Construction
+           - UI Inputs & Button
+           - Graph Execution & Output Display
+        5. **No `NameError`**: Define classes/functions before using them.
+        6. **Output**: ONLY the Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -282,7 +217,7 @@ def node_code_reviewer(state: AgentState):
         if not clean_code:
             clean_code = content.replace("```python", "").replace("```", "").strip()
 
-        return {"final_code": clean_code, "steps_log": ["Final Code Generated"]}
+        return {"final_code": clean_code, "steps_log": ["Final App Generated"]}
     except Exception as e:
         return {"error": f"Reviewer Error: {str(e)}", "steps_log": ["Code Generation Failed"]}
 
@@ -369,110 +304,38 @@ if start_btn:
 if st.session_state.get('res_final'):
     st.divider()
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["⚡ Test Agent", "Final Code 🚀", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
+    # Updated Tabs - No more Execution, just Code Generation
+    tab1, tab2, tab3, tab4 = st.tabs(["🚀 Generated App Code", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
     
     with tab1:
-        st.subheader("Interactive Agent Playground")
-        st.info("The agent code has been loaded into memory. Try it out below!")
+        st.subheader("Your New Agent Application")
+        st.success("Agent successfully generated! Follow the steps below to run it.")
         
-        local_scope = {}
-        generated_code = st.session_state['res_final']
-        required_keys = []
-        parsing_error = False
+        code = st.session_state.get('res_final', '')
+        st.code(code, language='python')
         
-        try:
-            # Pre-load common modules
-            import langchain_community
-            import langchain_core
-            import langchain_google_genai
-            import langgraph
-            
-            exec(generated_code, globals(), local_scope)
-            
-            if 'get_required_api_keys' in local_scope:
-                try:
-                    required_keys = local_scope['get_required_api_keys']()
-                except Exception as e:
-                    st.warning(f"Could not automatically detect API keys: {e}")
-            else:
-                st.warning("Agent code structure incomplete: missing `get_required_api_keys`.")
-
-        except ModuleNotFoundError as e:
-            parsing_error = True
-            missing_module = str(e).split("'")[1] if "'" in str(e) else str(e)
-            
-            st.warning(f"🚨 Missing Module Detected: `{missing_module}`")
-            
-            # Simple heuristic: don't try to install submodules like 'langchain_core.pydantic_v1'
-            if "." in missing_module:
-                st.error(f"Cannot auto-install submodule `{missing_module}`. This is likely a version incompatibility (e.g., using deprecated code). Please regenerate the agent.")
-            else:
-                if st.button(f"📥 Install {missing_module} and Reload"):
-                    with st.spinner(f"Installing {missing_module}..."):
-                        if install_missing_package(missing_module):
-                            st.success("Installed! Reloading app...")
-                            st.rerun()
-
-        except SyntaxError as e:
-            parsing_error = True
-            st.error(f"Syntax Error in generated code: {e}")
-            st.markdown("Check the 'Final Code' tab. The AI might have included text outside the code block.")
-        except Exception as e:
-            parsing_error = True
-            st.error(f"Error loading agent: {e}")
-
-        if not parsing_error:
-            user_secrets = {}
-            if required_keys:
-                st.warning(f"This agent requires external API keys: {', '.join(required_keys)}")
-                for key_name in required_keys:
-                    val = st.text_input(f"Enter {key_name}", type="password", key=f"secret_{key_name}")
-                    user_secrets[key_name] = val
-
-            test_query = st.text_input("Talk to your new agent:", placeholder="Enter a query...")
-            
-            if st.button("Run Agent"):
-                if not test_query:
-                    st.warning("Please enter a query.")
-                else:
-                    missing_keys = [k for k in required_keys if not user_secrets.get(k)]
-                    if missing_keys:
-                        st.error(f"Missing keys: {', '.join(missing_keys)}")
-                    else:
-                        with st.spinner("Running your custom agent..."):
-                            try:
-                                if 'run_agent' in local_scope:
-                                    sig = inspect.signature(local_scope['run_agent'])
-                                    if 'secrets' in sig.parameters:
-                                        result = local_scope['run_agent'](test_query, api_key, user_secrets)
-                                    else:
-                                        result = local_scope['run_agent'](test_query, api_key)
-                                        
-                                    st.success("Result:")
-                                    st.write(result)
-                                else:
-                                    st.error("Function `run_agent` not found in generated code.")
-                            except ModuleNotFoundError as e:
-                                st.error(f"Runtime Missing Module: {str(e)}")
-                            except Exception as e:
-                                st.error(f"Runtime Error: {str(e)}")
-                                st.code(traceback.format_exc())
-
-    with tab2:
-        st.subheader("Your Custom Agent Code")
-        st.code(st.session_state.get('res_final', ''), language='python')
+        st.markdown("### How to Run This Agent")
+        st.markdown("""
+        1. **Download** the code using the button below.
+        2. **Install Dependencies** (check the top of the file for the exact command, usually: `pip install streamlit langchain-google-genai langgraph`).
+        3. **Run** the app:
+        ```bash
+        streamlit run my_new_agent.py
+        ```
+        """)
+        
         st.download_button(
-            label="Download Python File",
-            data=st.session_state.get('res_final', ''),
+            label="Download my_new_agent.py",
+            data=code,
             file_name="my_new_agent.py",
             mime="text/x-python"
         )
 
-    with tab3:
+    with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
 
-    with tab4:
+    with tab3:
         st.code(st.session_state.get('res_draft', 'Processing...'), language='python')
         
-    with tab5:
+    with tab4:
         st.markdown(st.session_state.get('res_api', 'Processing...'))
