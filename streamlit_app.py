@@ -250,6 +250,11 @@ def node_architect(state: AgentState):
         - **NEVER** use `workflow.set_entry_point(START)`. This causes a ValueError.
         - Example: If your first node is `def start_node(state):`, use `workflow.set_entry_point("start_node")`.
         
+        **CRITICAL PYTHON SYNTAX:**
+        - **NO BACKSLASHES IN F-STRINGS**: Do NOT use `\` inside f-string expressions.
+        - BAD: `f"{{text.split('\\n')}}"`
+        - GOOD: `parts = text.split('\\n')` then `f"{{parts}}"`
+        
         The output must be a ready-to-run file.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -306,7 +311,8 @@ def node_code_reviewer(state: AgentState):
         7. **No `NameError`**: Define classes/functions before use.
         8. **LangGraph Check**: Verify `workflow.set_entry_point("node_name")` uses a STRING, NOT `START`.
         9. **Forbidden Imports**: Do NOT import `AnyValue` or `BaseCheckpoint`.
-        10. **Output**: ONLY Python code in markdown blocks.
+        10. **Syntax Safety**: Ensure NO backslashes inside f-strings (e.g., `f"{{x.split('\\n')}}"` is ILLEGAL).
+        11. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)

@@ -1,308 +1,325 @@
-"""
-REQUIRED INSTALLATION:
-pip install streamlit langgraph langchain-google-genai sendgrid
-"""
+# To run this application, install the required packages:
+# pip install streamlit langgraph langchain-google-genai pydantic
+# -------------------------------------------------------------------
 
 import streamlit as st
 import os
-from typing import TypedDict, Annotated
-import operator
-import re
+import json
+from typing import TypedDict, Annotated, List
 
-# LangGraph and LangChain imports
+# LangGraph and LangChain components
 from langgraph.graph import StateGraph, END
+from langchain_core.messages import SystemMessage
+from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
 
-# Attempt to import SendGrid (External Dependency Check)
-SENDGRID_AVAILABLE = False
-try:
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail
-    SENDGRID_AVAILABLE = True
-except ImportError:
-    pass # Will be handled in the Streamlit UI and the send_email node
+# --- 1. State Management Definition ---
 
-# --- 4. What Information Needs to be Stored in the State ---
-class AgentState(TypedDict):
+class InterviewCoachState(TypedDict):
     """
-    Represents the state of our graph, carrying data between nodes.
+    Represents the state of the LangGraph workflow.
+    Keys match the requirements outline.
     """
-    recipient_email: str
-    email_topic: str
-    email_subject: str
-    email_body: str
-    # Use operator.add to append status messages throughout the workflow
-    status_message: Annotated[list[str], operator.add]
+    job_role: str
+    experience_level: str
+    identified_skills: List[str]
+    generated_questions: List[str]
+    final_interview_guide_text: str
+    status: str
 
-# --- Helper Functions ---
+# --- 2. Pydantic Schemas for Structured Output ---
 
-def is_valid_email(email):
-    """Simple regex for basic email validation."""
-    return re.match(r"[^@]+@[^@]+\.[^@]+", email)
+class SkillsList(BaseModel):
+    """A list containing 6 critical skills (3 technical, 3 soft) for the role."""
+    skills: List[str] = Field(description="A list of exactly 6 identified skills.")
 
-# --- 2. Necessary Nodes (Functions) Required in the Graph ---
+class QuestionsList(BaseModel):
+    """A list containing 3 challenging interview questions."""
+    questions: List[str] = Field(description="A list of exactly 3 generated interview questions.")
 
-def write_email(state: AgentState) -> AgentState:
-    """
-    Node 1: Uses the LLM (Gemini) to draft a professional email.
-    Inputs: email_topic
-    Outputs: email_subject, email_body
-    """
-    st.info("🤖 Node: Generating email draft...")
-    
-    # Get LLM configuration from session state
-    gemini_api_key = st.session_state.get("GEMINI_API_KEY")
-    if not gemini_api_key:
-        st.error("Gemini API Key is missing.")
-        return {"status_message": ["Error: Gemini API Key not set."]}
+# --- 3. LLM Initialization Helper ---
 
-    try:
-        # MANDATORY: Use ChatGoogleGenerativeAI
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            api_key=gemini_api_key,
-            temperature=0.3
-        )
-    except Exception as e:
-        st.error(f"Failed to initialize LLM: {e}")
-        return {"status_message": [f"Error initializing LLM: {e}"]}
-
-    topic = state['email_topic']
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", 
-         "You are a professional email assistant. Write a short, formal email based on the topic. "
-         "The output MUST strictly follow the format: 'SUBJECT: [Your Subject Line]\\n\\nBODY: [Your Email Body Content]'. "
-         "Ensure the body content starts immediately after 'BODY:' without extra introductory text."),
-        ("human", f"Topic: {topic}")
-    ])
-    
-    chain = prompt | llm
-    
-    try:
-        response = chain.invoke({})
-        content = response.content
-        
-        # Parse the structured output using regex
-        subject_match = re.search(r"SUBJECT:\s*(.*)", content, re.IGNORECASE)
-        body_match = re.search(r"BODY:\s*(.*)", content, re.IGNORECASE | re.DOTALL)
-        
-        subject = subject_match.group(1).strip() if subject_match else "Draft Subject Missing"
-        # Clean up the body content
-        body = body_match.group(1).strip() if body_match else "Draft body missing."
-        
-        st.success("✅ Email content generated successfully.")
-        
-        return {
-            "email_subject": subject,
-            "email_body": body,
-            "status_message": ["Email draft created by LLM."]
-        }
-    except Exception as e:
-        st.error(f"LLM generation failed: {e}")
-        return {"status_message": [f"Error during email generation: {e}"]}
-
-
-def send_email(state: AgentState) -> AgentState:
-    """
-    Node 2: Uses the SendGrid API to dispatch the email.
-    Inputs: recipient_email, email_subject, email_body
-    Outputs: status_message
-    """
-    st.info("📧 Node: Attempting to send email via SendGrid...")
-    
-    sg_key = st.session_state.get("SENDGRID_API_KEY")
-    
-    # Check if key is present AND the library is installed
-    if not sg_key or not SENDGRID_AVAILABLE:
-        msg = f"Error: SendGrid API Key not set or library missing. Email sending SIMULATED only."
-        st.warning(msg)
-        
-        # Log the simulated action based on the draft content for transparency
-        sim_msg = (
-            f"--- SIMULATION DETAILS ---\n"
-            f"To: {state['recipient_email']}\n"
-            f"Subject: {state['email_subject']}\n"
-            f"Body snippet: {state['email_body'][:50]}..."
-        )
-        st.code(sim_msg, language="text")
-        
-        return {"status_message": [msg]}
-
-    recipient = state['recipient_email']
-    subject = state['email_subject']
-    body = state['email_body']
-    
-    # NOTE: SendGrid requires a verified sender email. 
-    # This must be configured in the environment or assumed.
-    SENDER_EMAIL = os.environ.get("SENDER_EMAIL", "test@example.com") 
-
-    try:
-        message = Mail(
-            from_email=SENDER_EMAIL,
-            to_emails=recipient,
-            subject=subject,
-            # Convert newlines to HTML breaks for robustness
-            html_content=body.replace('\n', '<br>') 
-        )
-        
-        sg = SendGridAPIClient(sg_key)
-        response = sg.send(message)
-        
-        if response.status_code == 202:
-            final_msg = f"Email sent successfully! Status Code: {response.status_code}"
-            st.success(final_msg)
-        else:
-            # SendGrid API returned non-202 status (e.g., 401 Unauthorized, 400 Bad Request)
-            final_msg = f"SendGrid API Error. Status Code: {response.status_code}. Response Body: {response.body.decode()}"
-            st.error(final_msg)
-            
-        return {"status_message": [final_msg]}
-
-    except Exception as e:
-        error_msg = f"Error during SendGrid API call: {e}"
-        st.error(error_msg)
-        return {"status_message": [error_msg]}
-
-
-# --- LangGraph Definition ---
-
-def create_graph():
-    """Defines the sequential workflow of the Email Sender Agent."""
-    workflow = StateGraph(AgentState)
-    
-    # Add Nodes
-    workflow.add_node("write_email", write_email)
-    workflow.add_node("send_email", send_email)
-    
-    # 3. Flow of Data (Edges)
-    # START -> write_email (Requirement 8 Check: Uses string node name)
-    workflow.set_entry_point("write_email") 
-    
-    # write_email -> send_email (Default edge)
-    workflow.add_edge("write_email", "send_email")
-    
-    # send_email -> END
-    workflow.add_edge("send_email", END)
-    
-    return workflow.compile()
-
-# --- Streamlit Application ---
-
-def main():
-    st.set_page_config(page_title="LangGraph Email Sender Agent", layout="wide")
-    st.title("📧 LangGraph Email Sender Agent")
-    st.markdown("Automates drafting and delivery using **Gemini** and **SendGrid**.")
-
-    # --- B. Configuration Components (Sidebar) ---
-    with st.sidebar:
-        st.header("1. API Key Configuration")
-        
-        # Requirement 3 Check: Gemini Key in sidebar, type=password
-        gemini_key = st.text_input(
-            "Google Gemini API Key", 
-            type="password", 
-            key="GEMINI_API_KEY", 
-            help="Used by the LLM drafting node."
-        )
-        
-        # Requirement 2 Check: SendGrid Key
-        sendgrid_key = st.text_input(
-            "SendGrid API Key", 
-            type="password", 
-            key="SENDGRID_API_KEY", 
-            help="Used by the message delivery node."
-        )
-
-        st.header("2. Dependencies")
-        if not SENDGRID_AVAILABLE:
-            st.error("🚨 `sendgrid` library not installed. Delivery will be simulated.")
-        else:
-            st.success("✅ `sendgrid` library detected.")
-
-    # --- A. Input Components (Primary Execution Interface) ---
-    st.header("Agent Inputs")
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        recipient_email = st.text_input(
-            "Recipient Email Address",
-            placeholder="recipient@example.com",
-            key="recipient_email_input"
-        )
-    
-    with col2:
-        # Display validation status
-        if recipient_email and not is_valid_email(recipient_email):
-            st.error("Invalid email format.")
-        elif recipient_email:
-            st.success("Email format OK.")
-
-    email_topic = st.text_area(
-        "Email Topic/Prompt",
-        placeholder="Draft a brief formal email requesting a follow-up meeting regarding the Q3 budget.",
-        key="email_topic_input"
+def get_llm(api_key: str) -> ChatGoogleGenerativeAI:
+    """Initializes the Gemini LLM with the provided API key."""
+    if not api_key:
+        raise ValueError("Gemini API Key is missing.")
+    # Using gemini-2.5-flash for fast, capable generation
+    return ChatGoogleGenerativeAI(
+        model="gemini-2.5-flash",
+        google_api_key=api_key,
+        temperature=0.4
     )
 
-    run_button = st.button("🚀 Run Email Sender Agent", use_container_width=True, type="primary")
+def get_llm_from_session() -> ChatGoogleGenerativeAI:
+    """Retrieves or initializes the LLM instance using the key stored in session state."""
+    api_key = st.session_state.get("gemini_api_key")
+    if not api_key:
+        raise ValueError("Gemini API Key is missing from session state.")
+    return get_llm(api_key)
 
-    if run_button:
-        # 1. Validation Checks
-        if not gemini_key:
-            st.error("Please enter the Google Gemini API Key in the sidebar.")
-            return
-        if not recipient_email or not is_valid_email(recipient_email):
-            st.error("Execution stopped: Please enter a valid recipient email.")
-            return
-        if not email_topic:
-            st.error("Execution stopped: Please enter an email topic.")
-            return
+# --- 4. Node Definitions ---
 
-        # 2. Initial State Setup
-        initial_state = AgentState(
-            recipient_email=recipient_email,
-            email_topic=email_topic,
-            email_subject="",
-            email_body="",
-            status_message=[]
+def Input_Initializer(state: InterviewCoachState) -> dict:
+    """Captures and validates user inputs, initializing the state object."""
+    st.session_state.status = "Initializing inputs..."
+    return {
+        "job_role": state["job_role"],
+        "experience_level": state["experience_level"],
+        "status": "Inputs initialized. Starting skill analysis."
+    }
+
+def skill_analyzer(state: InterviewCoachState) -> dict:
+    """Node 1: Analyzes role/level to identify critical skills (3 Tech, 3 Soft)."""
+    st.session_state.status = "Analyzing critical skills (Node 1)..."
+    
+    try:
+        llm = get_llm_from_session()
+    except ValueError as e:
+        st.error(str(e))
+        return {"status": "Failed due to missing API key."}
+        
+    role = state["job_role"]
+    level = state["experience_level"]
+    
+    # Use structured output for reliable JSON parsing
+    structured_llm = llm.with_structured_output(SkillsList)
+    
+    prompt = f"""
+    You are an expert career coach. Analyze the job role: '{role}' at the '{level}' experience level.
+    
+    Identify the 6 most critical skills required for success:
+    1. Exactly 3 highly relevant Technical/Hard Skills.
+    2. Exactly 3 highly relevant Soft/Behavioral Skills.
+    
+    Return the skills as a JSON list.
+    """
+    
+    try:
+        response = structured_llm.invoke([SystemMessage(prompt)])
+        identified_skills = response.skills
+        if len(identified_skills) != 6:
+             st.warning(f"Skill analysis returned {len(identified_skills)} skills, expected 6. Using results.")
+             
+    except Exception as e:
+        st.error(f"Error in skill_analyzer LLM call: {e}")
+        # Provide a safe fallback list if structured output fails entirely
+        identified_skills = ["Communication", "Problem Solving", "Technical Leadership"] 
+
+    return {
+        "identified_skills": identified_skills,
+        "status": f"Skills analyzed: {len(identified_skills)} found."
+    }
+
+def question_generator(state: InterviewCoachState) -> dict:
+    """Node 2: Generates 3 challenging interview questions mapping to the identified skills."""
+    st.session_state.status = "Generating challenging questions (Node 2)..."
+    
+    try:
+        llm = get_llm_from_session()
+    except ValueError as e:
+        st.error(str(e))
+        return {"status": "Failed due to missing API key."}
+
+    role = state["job_role"]
+    level = state["experience_level"]
+    skills = state["identified_skills"]
+    
+    structured_llm = llm.with_structured_output(QuestionsList)
+    
+    prompt = f"""
+    You are an expert interviewer for the position of {level} {role}.
+    
+    Based on the following critical skills, generate 3 challenging, specific, and situational/behavioral interview questions:
+    Critical Skills: {', '.join(skills)}
+    
+    Ensure the questions require detailed, structured answers. Return only the 3 questions as a JSON list.
+    """
+    
+    try:
+        response = structured_llm.invoke([SystemMessage(prompt)])
+        generated_questions = response.questions
+        if len(generated_questions) != 3:
+            st.warning(f"Question generation returned {len(generated_questions)} questions, expected 3. Using results.")
+    except Exception as e:
+        st.error(f"Error in question_generator LLM call: {e}")
+        generated_questions = ["Tell me about a project failure.", "How do you prioritize competing deadlines?", "Describe a conflict with a peer."] # Safe defaults
+
+    return {
+        "generated_questions": generated_questions,
+        "status": "Questions generated."
+    }
+
+def answer_guide(state: InterviewCoachState) -> dict:
+    """Node 3: Creates a detailed response guide for each question, using the STAR Method."""
+    st.session_state.status = "Generating detailed STAR method guide (Node 3)..."
+    
+    try:
+        llm = get_llm_from_session()
+    except ValueError as e:
+        st.error(str(e))
+        return {"status": "Failed due to missing API key."}
+
+    role = state["job_role"]
+    level = state["experience_level"]
+    questions = state["generated_questions"]
+    skills = state["identified_skills"]
+    
+    guide_parts = []
+    
+    introduction = f"""# 🌟 Interview Coach Guide: {level} {role}\n\n"""
+    introduction += f"**Targeted Skills:** {', '.join(skills)}\n\n"
+    introduction += "---"
+    guide_parts.append(introduction)
+    
+    for i, question in enumerate(questions):
+        prompt = f"""
+        You are an expert interview coach. Provide detailed, actionable guidance for answering the following interview question for a {level} {role} position.
+        
+        Question {i+1}: "{question}"
+        
+        The guidance MUST explicitly structure the recommended answer approach using the **STAR Method** (Situation, Task, Action, Result).
+        
+        Provide the output in clean Markdown format.
+        """
+        
+        response = llm.invoke([SystemMessage(prompt)])
+        
+        markdown_output = f"## Q{i+1}: {question}\n\n"
+        markdown_output += response.content
+        markdown_output += "\n\n---\n"
+        guide_parts.append(markdown_output)
+
+    final_guide = "\n\n".join(guide_parts)
+    
+    return {
+        "final_interview_guide_text": final_guide,
+        "status": "Complete. Guide generated."
+    }
+
+# --- 5. Graph Construction and Execution ---
+
+def build_and_run_graph(job_role: str, experience_level: str):
+    """Builds, compiles, and runs the LangGraph workflow."""
+    
+    # 1. Define the Graph
+    workflow = StateGraph(InterviewCoachState)
+    
+    # 2. Add Nodes
+    workflow.add_node("Input_Initializer", Input_Initializer)
+    workflow.add_node("skill_analyzer", skill_analyzer)
+    workflow.add_node("question_generator", question_generator)
+    workflow.add_node("answer_guide", answer_guide)
+    
+    # 3. Define Edges (Sequential Flow)
+    workflow.set_entry_point("Input_Initializer") 
+    
+    workflow.add_edge("Input_Initializer", "skill_analyzer")
+    workflow.add_edge("skill_analyzer", "question_generator")
+    workflow.add_edge("question_generator", "answer_guide")
+    
+    # End node
+    workflow.add_edge("answer_guide", END)
+    
+    # 4. Compile the Graph
+    app = workflow.compile()
+    
+    # 5. Define Initial State
+    initial_state = {
+        "job_role": job_role,
+        "experience_level": experience_level,
+        "identified_skills": [],
+        "generated_questions": [],
+        "final_interview_guide_text": "",
+        "status": "Starting..."
+    }
+    
+    try:
+        # 6. Invoke the Graph
+        st.session_state.status = "Starting workflow execution..."
+        
+        # Invoke runs the sequential graph until END
+        final_state = app.invoke(initial_state)
+        
+        # 7. Update UI with final result
+        st.session_state.status = final_state["status"]
+        st.session_state.final_output = final_state["final_interview_guide_text"]
+        
+    except Exception as e:
+        st.error(f"A critical error occurred during workflow execution: {e}")
+        st.session_state.status = "Execution Failed."
+        
+    st.rerun()
+
+# --- 6. Streamlit Main Application ---
+
+def main():
+    st.set_page_config(page_title="Job Interview Coach Agent (LangGraph)", layout="wide")
+    st.title("🧠 LangGraph Job Interview Coach Agent")
+    st.caption("Personalized interview preparation powered by LangGraph and Google Gemini.")
+
+    # Initialize session state keys if they don't exist
+    if 'status' not in st.session_state:
+        st.session_state.status = "Awaiting input."
+    if 'final_output' not in st.session_state:
+        st.session_state.final_output = ""
+        
+    # --- Sidebar for API Key ---
+    with st.sidebar:
+        st.header("1. Configuration")
+        gemini_api_key = st.text_input(
+            "Google Gemini API Key", 
+            type="password", 
+            help="Required for all LLM processing nodes."
+        )
+        if gemini_api_key:
+            st.session_state["gemini_api_key"] = gemini_api_key
+        else:
+            st.session_state.pop("gemini_api_key", None)
+        
+        st.markdown("---")
+        st.markdown("### Agent Status")
+        st.info(st.session_state.status, icon="⚙️")
+
+    # --- Main Input Area ---
+    st.header("2. Define Your Target Role")
+    
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        job_role = st.text_input(
+            "Job Role", 
+            placeholder="e.g., Cloud Architect, UX Designer, Marketing Manager",
+            key="job_role_input"
+        )
+        
+    with col2:
+        experience_level = st.selectbox(
+            "Experience Level",
+            options=["Junior", "Mid-Level", "Senior", "Executive"],
+            key="level_input"
         )
 
-        # 3. Compile and Run Graph
-        try:
-            app = create_graph()
+    # --- Action Button ---
+    st.markdown("---")
+    
+    can_run = job_role and gemini_api_key
+    
+    if st.button("🚀 Generate Coach Guide", type="primary", use_container_width=True, disabled=not can_run):
+        if not gemini_api_key:
+            st.error("Please provide your Google Gemini API Key in the sidebar.")
+        elif not job_role:
+            st.error("Please specify the Job Role.")
+        else:
+            # Start the graph execution
+            build_and_run_graph(job_role, experience_level)
             
-            st.subheader("Workflow Execution Log")
-            
-            # Invoke the graph to execute the sequential workflow
-            final_state = app.invoke(initial_state)
-
-            # --- C. Output Components ---
-            st.subheader("Final Agent Results")
-            st.markdown("---")
-
-            # Display generated content
-            st.markdown(f"**Recipient:** `{final_state['recipient_email']}`")
-            st.subheader("Generated Email Content")
-            st.code(f"Subject: {final_state['email_subject']}", language="text")
-            
-            st.markdown("### Email Body:")
-            # Replace newlines with markdown line breaks (two spaces + newline)
-            st.markdown(final_state['email_body'].replace('\n', '  \n')) 
-
-            # Display final status
-            st.subheader("Delivery Status")
-            for msg in final_state['status_message']:
-                if "Error" in msg or "failed" in msg or "SIMULATED" in msg:
-                    st.error(msg)
-                elif "sent successfully" in msg:
-                    st.success(msg)
-                else:
-                    st.write(f"- {msg}")
-
-        except Exception as e:
-            st.exception(f"An unexpected error occurred during graph execution: {e}")
-
+    # --- Output Display Area ---
+    st.header("3. Interview Guide Output")
+    
+    if 'final_output' in st.session_state and st.session_state.final_output:
+        st.markdown(st.session_state.final_output)
+    else:
+        st.info("The detailed STAR Method interview guide will appear here after generation. Click the button to start.")
 
 if __name__ == "__main__":
     main()
