@@ -2,10 +2,21 @@ import streamlit as st
 import os
 import re
 import traceback
-from typing import TypedDict, List, Union, Dict, Any
+from typing import TypedDict, List, Union, Dict, Any, Optional
 import inspect
 import subprocess
 import sys
+
+# --- Robustness: Pre-import common standard libraries ---
+# This acts as a safety net. If the generated agent forgets to import these,
+# they will still be available in the execution environment, preventing NameErrors.
+import datetime
+import json
+import math
+import random
+import time
+import uuid
+
 from pydantic import BaseModel, Field
 
 # --- Third-party Imports ---
@@ -182,7 +193,10 @@ def node_architect(state: AgentState):
         
         4. COMPATIBILITY: Use standard `pydantic` v2. Do NOT use `langchain_core.pydantic_v1`.
         
-        5. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field`.
+        5. IMPORTS: 
+           - Include `from typing import Dict, List, Any, Optional`.
+           - Include `from pydantic import BaseModel, Field`.
+           - Include standard libs like `import json`, `import datetime`, `import random` if needed.
 
         6. STRICT CODE STRUCTURE (Follow this order to prevent NameError):
            a. Imports
@@ -254,7 +268,7 @@ def node_code_reviewer(state: AgentState):
         
         5. Assume `langchain_community` is installed.
         6. COMPATIBILITY: Use standard `pydantic` v2 (e.g. `from pydantic import BaseModel`). Do NOT use `langchain_core.pydantic_v1`.
-        7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top.
+        7. IMPORTS: Include `from typing import Dict, List, Any` and `from pydantic import BaseModel, Field` at the top. Ensure `import datetime` or `import json` are present if used.
         8. CRITICAL FIX for NameError:
            - You MUST define ALL classes/Pydantic models (e.g. `class TouristSpot(BaseModel):`) **IMMEDIATELY AFTER IMPORTS**.
            - Do NOT define classes inside functions.
