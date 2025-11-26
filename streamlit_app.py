@@ -6,6 +6,7 @@ from typing import TypedDict, List, Union, Dict, Any, Optional
 import inspect
 import subprocess
 import sys
+import importlib.util
 
 # --- Robustness: Pre-import common standard libraries ---
 # This acts as a safety net. If the generated agent forgets to import these,
@@ -118,27 +119,20 @@ def sanitize_code(code: str) -> str:
         code = code.replace("ChatOpenAI", "ChatGoogleGenerativeAI")
     
     # Fix 3: Remove non-existent AnyValue import from langgraph (Common Hallucination)
-    # This fixes: ImportError: cannot import name 'AnyValue' from 'langgraph.graph.message'
     code = code.replace("from langgraph.graph.message import AnyValue", "")
-    code = code.replace(", AnyValue", "") # Remove if part of a list
-    code = code.replace("AnyValue, ", "") # Remove if start of a list
-    # Replace usages of AnyValue type hint with Any
+    code = code.replace(", AnyValue", "") 
+    code = code.replace("AnyValue, ", "") 
     code = code.replace(": AnyValue", ": Any")
     code = code.replace("-> AnyValue", "-> Any")
     
     # Fix 4: Auto-fix the "set_entry_point(START)" error if it appears
     if "set_entry_point(START)" in code:
-        # This is a risky replace, but usually the first node is defined right before. 
-        # Better to rely on the prompt fix below, but we can try to replace START with a placeholder string 
-        # that might cause a clearer error, or just leave it.
         pass
 
     # Fix 5: Remove non-existent BaseCheckpoint import from langgraph
-    # This fixes: ImportError: cannot import name 'BaseCheckpoint' from 'langgraph.checkpoint.base'
     code = code.replace("from langgraph.checkpoint.base import BaseCheckpoint", "")
     code = code.replace(", BaseCheckpoint", "")
     code = code.replace("BaseCheckpoint, ", "")
-    # Replace usages
     code = code.replace(": BaseCheckpoint", ": Any")
     code = code.replace("-> BaseCheckpoint", "-> Any")
         
@@ -152,29 +146,55 @@ PACKAGE_MAPPING = {
     "PIL": "Pillow",
     "dotenv": "python-dotenv",
     "yaml": "PyYAML",
-    "dateutil": "python-dateutil"
+    "dateutil": "python-dateutil",
+    "sendgrid": "sendgrid",
+    "google_search_results": "google-search-results" 
 }
 
-def install_missing_package(import_name: str):
-    """Attempts to install a missing package via pip, handling aliases."""
+def is_package_installed(package_name: str) -> bool:
+    """Checks if a package is installed in the current environment."""
+    # Handle mappings like bs4 -> beautifulsoup4
+    pypi_name = PACKAGE_MAPPING.get(package_name, package_name)
+    # For import check, we often need the import name, not pypi name.
+    # This simplistic check tries to import the module directly.
     try:
-        package_name = PACKAGE_MAPPING.get(import_name, import_name)
-        if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
-            raise ValueError(f"Invalid package name: {package_name}")
-            
-        st.info(f"Attempting to install `{package_name}`...")
-        result = subprocess.run(
-            [sys.executable, "-m", "pip", "install", package_name],
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            st.error(f"Pip Install Failed for `{package_name}`:\n\n{result.stderr}")
-            return False
-        return True
-    except Exception as e:
-        st.error(f"System Error during install of {package_name}: {e}")
+        return importlib.util.find_spec(package_name) is not None
+    except Exception:
         return False
+
+def install_package(package_name: str) -> bool:
+    """Installs a package via pip."""
+    pypi_name = PACKAGE_MAPPING.get(package_name, package_name)
+    if not re.match(r"^[a-zA-Z0-9_\-]+$", pypi_name):
+        st.error(f"Invalid package name: {pypi_name}")
+        return False
+        
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pypi_name])
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def check_imports_in_code(code: str) -> List[str]:
+    """Scans code for imports and returns a list of missing modules."""
+    missing = []
+    # Regex to find 'import X' or 'from X import Y'
+    # Captures the first word after import/from
+    imports = re.findall(r'^\s*(?:import|from)\s+([a-zA-Z0-9_]+)', code, re.MULTILINE)
+    
+    # Filter out standard libs (approximate list + builtins)
+    stdlib = sys.builtin_module_names
+    ignore_list = set(stdlib) | {
+        'streamlit', 'os', 're', 'json', 'math', 'random', 'time', 'uuid', 
+        'datetime', 'typing', 'inspect', 'subprocess', 'sys', 'traceback',
+        'pydantic', 'langchain_google_genai', 'langchain_core', 'langgraph'
+    }
+    
+    for module in set(imports):
+        if module not in ignore_list:
+            if not is_package_installed(module):
+                missing.append(module)
+    return missing
 
 # --- Node Logic ---
 
@@ -250,7 +270,7 @@ def node_api_specialist(state: AgentState):
         {state['initial_code']}
         
         1. Ensure `st.sidebar.text_input` exists for "Google Gemini API Key".
-        2. Ensure ANY other API keys (Serper, Weather, etc.) are also in the sidebar.
+        2. Ensure ANY other API keys (SendGrid, Serper, Weather, etc.) are ALSO in the sidebar.
         3. Verify NO OpenAI keys are requested. If they are, replace them with Gemini.
         4. Suggest adding a comment at the top of the file listing `pip install` commands.
         """
@@ -277,13 +297,15 @@ def node_code_reviewer(state: AgentState):
         STRICT REQUIREMENTS:
         1. **Standalone File**: The code must run with `streamlit run app.py`.
         2. **LLM**: MUST be `ChatGoogleGenerativeAI`. REMOVE all references to OpenAI.
-        3. **Sidebar**: Sidebar input MUST be `st.sidebar.text_input("Google Gemini API Key", type="password")`.
+        3. **Sidebar**: 
+           - `st.sidebar.text_input("Google Gemini API Key", type="password")`
+           - **CRITICAL**: If 3rd party tools are used (e.g., SendGrid), add `st.sidebar.text_input("SendGrid API Key", type="password")`.
         4. **Dependencies**: Comment block at top with `pip install` commands (include `langchain-google-genai`).
         5. **Imports**: Ensure correct imports (`streamlit`, `langgraph`, `pydantic`, `langchain_google_genai`).
         6. **Structure**: Imports -> `st.set_page_config` -> Sidebar -> Classes/State -> Nodes -> Graph -> UI.
         7. **No `NameError`**: Define classes/functions before use.
         8. **LangGraph Check**: Verify `workflow.set_entry_point("node_name")` uses a STRING, NOT `START`.
-        9. **Forbidden Imports**: Do NOT import `AnyValue` from `langgraph.graph.message`. Do NOT import `BaseCheckpoint` from `langgraph.checkpoint.base`.
+        9. **Forbidden Imports**: Do NOT import `AnyValue` or `BaseCheckpoint`.
         10. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
@@ -303,7 +325,6 @@ def node_code_reviewer(state: AgentState):
 # --- Main App Logic ---
 
 # PERSISTENCE FIX: Check if an agent exists and load it into session state
-# This ensures that if the user refreshes the page, the agent code is not lost.
 if "res_final" not in st.session_state:
     if os.path.exists("pages/generated_agent.py"):
         try:
@@ -387,11 +408,28 @@ if st.session_state.get('res_final'):
     
     with tab1:
         st.subheader("Your New Agent Application")
-        st.success("Agent successfully generated! You can download it OR auto-deploy it to the sidebar.")
         
         code = st.session_state.get('res_final', '')
         st.code(code, language='python')
         
+        # --- Dependency Checker ---
+        missing_libs = check_imports_in_code(code)
+        if missing_libs:
+            st.warning(f"⚠️ Missing Libraries Detected: {', '.join(missing_libs)}")
+            st.markdown("The agent might crash if these are not installed.")
+            for lib in missing_libs:
+                if st.button(f"📥 Install `{lib}`", key=f"install_{lib}"):
+                    with st.spinner(f"Installing {lib}..."):
+                        if install_package(lib):
+                            st.success(f"Successfully installed {lib}!")
+                            st.rerun() # Refresh to update check
+                        else:
+                            st.error(f"Failed to install {lib}. Check logs.")
+        else:
+            st.success("✅ All detected dependencies are installed.")
+
+        # --- Deployment Buttons ---
+        st.markdown("---")
         col1, col2 = st.columns(2)
         
         with col1:
@@ -412,7 +450,6 @@ if st.session_state.get('res_final'):
                         f.write(code)
                     
                     st.session_state['agent_deployed'] = True
-                    # Force refresh so file watcher catches the new page
                     st.rerun()
                     
                 except Exception as e:
@@ -424,11 +461,10 @@ if st.session_state.get('res_final'):
             st.markdown("You should see a page called **`generated_agent`**. Click it to run your new app.")
             st.info("Don't see it? It's safe to **refresh your browser** now. Your agent code is saved locally and will reappear here.")
             
-            # Attempt link, but fail gracefully if Streamlit isn't ready yet
             try:
                 st.page_link("pages/generated_agent.py", label="Open Agent Directly", icon="🤖", use_container_width=True)
             except Exception:
-                pass # User can use the sidebar
+                pass
 
     with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
