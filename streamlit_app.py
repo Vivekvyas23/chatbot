@@ -9,7 +9,7 @@ import sys
 
 # --- Robustness: Pre-import common standard libraries ---
 # This acts as a safety net. If the generated agent forgets to import these,
-# they will still be available in the execution environment, preventing NameErrors.
+# they will still be available in the execution environment.
 import datetime
 import json
 import math
@@ -103,6 +103,38 @@ def extract_code(text: str) -> str:
     except Exception:
         return text
 
+# Mapping of common import names to their actual PyPI package names
+PACKAGE_MAPPING = {
+    "bs4": "beautifulsoup4",
+    "sklearn": "scikit-learn",
+    "cv2": "opencv-python",
+    "PIL": "Pillow",
+    "dotenv": "python-dotenv",
+    "yaml": "PyYAML",
+    "dateutil": "python-dateutil"
+}
+
+def install_missing_package(import_name: str):
+    """Attempts to install a missing package via pip, handling aliases."""
+    try:
+        package_name = PACKAGE_MAPPING.get(import_name, import_name)
+        if not re.match(r"^[a-zA-Z0-9_\-]+$", package_name):
+            raise ValueError(f"Invalid package name: {package_name}")
+            
+        st.info(f"Attempting to install `{package_name}`...")
+        result = subprocess.run(
+            [sys.executable, "-m", "pip", "install", package_name],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            st.error(f"Pip Install Failed for `{package_name}`:\n\n{result.stderr}")
+            return False
+        return True
+    except Exception as e:
+        st.error(f"System Error during install of {package_name}: {e}")
+        return False
+
 # --- Node Logic ---
 
 def node_requirements_analyst(state: AgentState):
@@ -120,8 +152,8 @@ def node_requirements_analyst(state: AgentState):
         2. The necessary Nodes (functions) required in the graph.
         3. The flow of data (Edges).
         4. What information needs to be stored in the State.
-        5. ANY external API keys needed (e.g., SendGrid, Spotify, OpenAI).
-        6. UI Components needed (e.g., "A text input for destination", "A file uploader for PDF").
+        5. ANY external API keys needed. **IMPORTANT: For the LLM, always specify 'Google API Key' (Gemini), NOT OpenAI.**
+        6. UI Components needed (e.g., "A text input for destination").
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -143,13 +175,14 @@ def node_architect(state: AgentState):
         Write a COMPLETE, STANDALONE Streamlit application (`app.py`).
         
         CRITICAL ARCHITECTURE RULES:
-        1. **Do NOT** wrap the logic in a `run_agent` function. Write a top-level script.
-        2. **Imports**: Start with `import streamlit as st`, `import os`, `from typing import...`, `from langgraph...`.
-        3. **Sidebar**: Use `st.sidebar` to collect ALL necessary API keys (Google API Key, etc.).
-        4. **Main UI**: Create `st.text_input`, `st.button`, etc., based on the requirements.
-        5. **Graph Definition**: Define the State, Nodes, and Graph *inside* the script.
-        6. **Execution**: When the user clicks the "Run" button, compile the graph and stream/invoke it. Display results using `st.write` or `st.markdown`.
-        7. **Compatibility**: Use standard `pydantic` v2.
+        1. **FORBIDDEN**: Do NOT use `langchain_openai` or `ChatOpenAI`. 
+        2. **MANDATORY**: You MUST use `langchain_google_genai` and `ChatGoogleGenerativeAI`.
+        3. **Sidebar**: In `st.sidebar`, ask for "Google Gemini API Key". Use this key to initialize the LLM.
+        4. **Imports**: Start with `import streamlit as st`, `import os`, `from typing import...`, `from langgraph...`, `from langchain_google_genai import ChatGoogleGenerativeAI`.
+        5. **Main UI**: Create `st.text_input`, `st.button`, etc., based on the requirements.
+        6. **Graph Definition**: Define the State, Nodes, and Graph *inside* the script.
+        7. **Execution**: When the user clicks the "Run" button, compile the graph and stream/invoke it. Display results using `st.write` or `st.markdown`.
+        8. **Compatibility**: Use standard `pydantic` v2.
         
         The output must be a ready-to-run file.
         """
@@ -170,9 +203,10 @@ def node_api_specialist(state: AgentState):
         Review this initial code draft:
         {state['initial_code']}
         
-        1. Ensure `st.sidebar.text_input` exists for EVERY API key needed (Gemini, Serper, etc.).
-        2. If missing, suggest adding them.
-        3. Suggest adding a comment at the top of the file listing `pip install` commands for required packages.
+        1. Ensure `st.sidebar.text_input` exists for "Google Gemini API Key".
+        2. Ensure ANY other API keys (Serper, Weather, etc.) are also in the sidebar.
+        3. Verify NO OpenAI keys are requested. If they are, replace them with Gemini.
+        4. Suggest adding a comment at the top of the file listing `pip install` commands.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -196,19 +230,13 @@ def node_code_reviewer(state: AgentState):
         
         STRICT REQUIREMENTS:
         1. **Standalone File**: The code must run with `streamlit run app.py`.
-        2. **Dependencies**: Include a comment block at the very top listing `pip install` commands.
-        3. **Imports**: Ensure all imports (`streamlit`, `langgraph`, `pydantic`, `langchain_google_genai`) are correct.
-        4. **Structure**: 
-           - Imports
-           - `st.set_page_config(...)`
-           - Sidebar for API Keys
-           - Pydantic Models & State Definition
-           - Node Functions
-           - Graph Construction
-           - UI Inputs & Button
-           - Graph Execution & Output Display
-        5. **No `NameError`**: Define classes/functions before using them.
-        6. **Output**: ONLY the Python code in markdown blocks.
+        2. **LLM**: MUST be `ChatGoogleGenerativeAI`. REMOVE all references to OpenAI.
+        3. **Sidebar**: Sidebar input MUST be `st.sidebar.text_input("Google Gemini API Key", type="password")`.
+        4. **Dependencies**: Comment block at top with `pip install` commands (include `langchain-google-genai`).
+        5. **Imports**: Ensure correct imports (`streamlit`, `langgraph`, `pydantic`, `langchain_google_genai`).
+        6. **Structure**: Imports -> `st.set_page_config` -> Sidebar -> Classes/State -> Nodes -> Graph -> UI.
+        7. **No `NameError`**: Define classes/functions before use.
+        8. **Output**: ONLY Python code in markdown blocks.
         """
         response = llm.invoke([HumanMessage(content=prompt)])
         content = get_content_string(response.content)
@@ -234,35 +262,25 @@ if start_btn:
     elif not user_input:
         st.warning("Please describe your agent first.")
     else:
-        # Store config
         st.session_state["api_key"] = api_key
         st.session_state["model"] = model_name
         
-        # Reset previous results
-        for key in ['res_req', 'res_draft', 'res_api', 'res_final', 'res_error']:
+        for key in ['res_req', 'res_draft', 'res_api', 'res_final', 'res_error', 'agent_deployed']:
             if key in st.session_state:
                 del st.session_state[key]
 
-        # --- Build the Graph ---
         workflow = StateGraph(AgentState)
-
-        # Add Nodes
         workflow.add_node("analyst", node_requirements_analyst)
         workflow.add_node("architect", node_architect)
         workflow.add_node("api_specialist", node_api_specialist)
         workflow.add_node("reviewer", node_code_reviewer)
-
-        # Add Edges
         workflow.set_entry_point("analyst")
         workflow.add_edge("analyst", "architect")
         workflow.add_edge("architect", "api_specialist")
         workflow.add_edge("api_specialist", "reviewer")
         workflow.add_edge("reviewer", END)
-
-        # Compile
         app = workflow.compile()
 
-        # Execute
         status_container = st.status("Building your agent...", expanded=True)
         
         initial_state = {
@@ -276,7 +294,6 @@ if start_btn:
         }
         
         try:
-            # Stream the updates
             for output in app.stream(initial_state):
                 for key, value in output.items():
                     if "steps_log" in value and value["steps_log"]:
@@ -304,7 +321,6 @@ if start_btn:
 if st.session_state.get('res_final'):
     st.divider()
     
-    # Updated Tabs - No more Execution, just Code Generation
     tab1, tab2, tab3, tab4 = st.tabs(["🚀 Generated App Code", "Requirements 📋", "Draft Code 🏗️", "API Analysis 🔌"])
     
     with tab1:
@@ -326,20 +342,31 @@ if st.session_state.get('res_final'):
             )
             
         with col2:
-            if st.button("🚀 Deploy & Open Agent", type="primary", use_container_width=True):
+            if st.button("🚀 Deploy Agent to Sidebar", type="primary", use_container_width=True):
                 try:
                     os.makedirs("pages", exist_ok=True)
                     file_path = os.path.join("pages", "generated_agent.py")
                     with open(file_path, "w") as f:
                         f.write(code)
                     
-                    st.success("Deployed! Redirecting...")
-                    time.sleep(1) # Give file watcher a moment
-                    st.switch_page("pages/generated_agent.py")
+                    # Set flag and rerun to force Streamlit to recognize the new page
+                    st.session_state['agent_deployed'] = True
+                    st.rerun()
                     
                 except Exception as e:
-                    st.error(f"Deployment/Navigation error: {e}")
-                    st.info("If redirection fails, try clicking the button again or look for 'generated_agent' in the sidebar.")
+                    st.error(f"Deployment error: {e}")
+
+        # Show the link only if deployed
+        if st.session_state.get('agent_deployed', False):
+            st.success("Deployment successful! The agent is now in the sidebar.")
+            try:
+                # st.page_link is the modern, robust way to navigate
+                st.page_link("pages/generated_agent.py", label="👉 Click Here to Open Agent", icon="🤖", use_container_width=True)
+            except AttributeError:
+                # Fallback for older Streamlit versions
+                st.info("Look for 'generated_agent' in the sidebar navigation to the left.")
+            except Exception as e:
+                st.warning(f"Navigation link unavailable (check sidebar): {e}")
 
     with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
