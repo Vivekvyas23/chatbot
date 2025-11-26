@@ -251,6 +251,17 @@ def node_code_reviewer(state: AgentState):
 
 # --- Main App Logic ---
 
+# PERSISTENCE FIX: Check if an agent exists and load it into session state
+# This ensures that if the user refreshes the page, the agent code is not lost.
+if "res_final" not in st.session_state:
+    if os.path.exists("pages/generated_agent.py"):
+        try:
+            with open("pages/generated_agent.py", "r") as f:
+                st.session_state["res_final"] = f.read()
+                st.session_state["agent_deployed"] = True
+        except Exception:
+            pass
+
 user_input = st.text_area("Describe the AI Agent you want to build:", height=100, 
                           placeholder="e.g., An agent that takes a topic, searches Google for recent news, summarizes it, and writes a LinkedIn post about it.")
 
@@ -360,6 +371,7 @@ if st.session_state.get('res_final'):
             st.success("✅ Agent deployed!")
             st.markdown("### 👉 Look at the sidebar on the left!")
             st.markdown("You should see a page called **`generated_agent`**. Click it to run your new app.")
+            st.info("Don't see it? It's safe to **refresh your browser** now. Your agent code is saved locally and will reappear here.")
             
             # Attempt link, but fail gracefully if Streamlit isn't ready yet
             try:
