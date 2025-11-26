@@ -309,27 +309,33 @@ if st.session_state.get('res_final'):
     
     with tab1:
         st.subheader("Your New Agent Application")
-        st.success("Agent successfully generated! Follow the steps below to run it.")
+        st.success("Agent successfully generated! You can download it OR auto-deploy it to the sidebar.")
         
         code = st.session_state.get('res_final', '')
         st.code(code, language='python')
         
-        st.markdown("### How to Run This Agent")
-        st.markdown("""
-        1. **Download** the code using the button below.
-        2. **Install Dependencies** (check the top of the file for the exact command, usually: `pip install streamlit langchain-google-genai langgraph`).
-        3. **Run** the app:
-        ```bash
-        streamlit run my_new_agent.py
-        ```
-        """)
+        col1, col2 = st.columns(2)
         
-        st.download_button(
-            label="Download my_new_agent.py",
-            data=code,
-            file_name="my_new_agent.py",
-            mime="text/x-python"
-        )
+        with col1:
+            st.download_button(
+                label="Download my_new_agent.py",
+                data=code,
+                file_name="my_new_agent.py",
+                mime="text/x-python",
+                use_container_width=True
+            )
+            
+        with col2:
+            if st.button("🚀 Auto-Deploy to Sidebar", type="primary", use_container_width=True):
+                try:
+                    os.makedirs("pages", exist_ok=True)
+                    file_path = os.path.join("pages", "generated_agent.py")
+                    with open(file_path, "w") as f:
+                        f.write(code)
+                    st.success("Deployed! Look at the sidebar 👈 for 'generated agent'.")
+                    st.info("If it doesn't appear instantly, try refreshing the page.")
+                except Exception as e:
+                    st.error(f"Failed to deploy: {e}")
 
     with tab2:
         st.markdown(st.session_state.get('res_req', 'Processing...'))
